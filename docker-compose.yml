@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  san_bot:
+    build: .
+    container_name: san_bot
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY}
+      - WECHAT_CORP_ID=${WECHAT_CORP_ID}
+      - WECHAT_CORP_SECRET=${WECHAT_CORP_SECRET}
+      - WECHAT_AGENT_ID=${WECHAT_AGENT_ID}
+      - WECHAT_TOKEN=${WECHAT_TOKEN}
+      - WECHAT_ENCODING_AES_KEY=${WECHAT_ENCODING_AES_KEY}
+    volumes:
+      - ./uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - san_bot_network
+
+networks:
+  san_bot_network:
+    driver: bridge
