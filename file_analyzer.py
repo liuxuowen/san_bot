@@ -2,9 +2,13 @@
 File analysis utilities for comparing files and generating reports
 """
 import os
+import re
 import json
 import difflib
-from typing import Tuple, Dict, Any
+from datetime import datetime
+from typing import Tuple, Dict, Any, List
+
+import pandas as pd
 
 
 class FileAnalyzer:
@@ -148,3 +152,263 @@ class FileAnalyzer:
         report += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
         return report
+
+    # -------------------- Custom CSV Analysis for Alliance Stats --------------------
+    @staticmethod
+    def _parse_cn_timestamp_from_filename(filename: str) -> datetime:
+        """Parse Chinese datetime from filename like 同盟统计YYYY年MM月DD日HH时MM分SS秒.csv"""
+        base = os.path.basename(filename)
+        m = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日(\d{1,2})时(\d{1,2})分(\d{1,2})秒", base)
+        if not m:
+            raise ValueError(f"无法从文件名解析时间戳: {filename}")
+        y, mo, d, h, mi, s = map(int, m.groups())
+        return datetime(y, mo, d, h, mi, s)
+
+    @staticmethod
+    def _read_member_stats_csv(path: str) -> pd.DataFrame:
+        """Read CSV and return DataFrame with columns: 成员, 战功总量, 分组"""
+        df = pd.read_csv(path, encoding='utf-8', skipinitialspace=True)
+        df.columns = df.columns.str.strip()
+        # Keep only needed columns, handle if some are missing
+        needed = ['成员', '战功总量', '分组']
+        for col in needed:
+            if col not in df.columns:
+                raise ValueError(f"CSV缺少必要列: {col} ({path})")
+        df = df[needed].copy()
+        # Normalize types
+        df['成员'] = df['成员'].astype(str).str.strip()
+        df['分组'] = df['分组'].astype(str).str.strip().replace({'': '未分组'})
+        df['战功总量'] = pd.to_numeric(df['战功总量'], errors='coerce').fillna(0).astype(int)
+        # Drop duplicate members by keeping the max 战功总量 (defensive)
+        df = df.sort_values('战功总量').drop_duplicates(subset=['成员'], keep='last').reset_index(drop=True)
+        return df
+
+    def analyze_battle_merit_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
+        """
+        比对两个同盟统计CSV，按文件名中的时间戳识别先后，
+        统计在此时间段内每位成员的 战功总量 差值，并按 分组、差值 排序输出。
+
+        Returns dict with keys: success, earlier, later, range, rows (list of dicts)
+        """
+        try:
+            t1 = self._parse_cn_timestamp_from_filename(file1_path)
+            t2 = self._parse_cn_timestamp_from_filename(file2_path)
+            # Determine earlier and later
+            if t1 <= t2:
+                earlier_path, later_path = file1_path, file2_path
+                earlier_ts, later_ts = t1, t2
+            else:
+                earlier_path, later_path = file2_path, file1_path
+                earlier_ts, later_ts = t2, t1
+
+            df_early = self._read_member_stats_csv(earlier_path)
+            df_late = self._read_member_stats_csv(later_path)
+
+            early = df_early.rename(columns={'战功总量': '战功总量_早', '分组': '分组_早'})
+            late = df_late.rename(columns={'战功总量': '战功总量_晚', '分组': '分组_晚'})
+
+            # Inner join: only keep members that exist in both files
+            merged = pd.merge(early, late, on='成员', how='inner')
+            # Determine group preference: later > earlier > 未分组
+            merged['分组'] = merged['分组_晚'].fillna(merged['分组_早']).fillna('未分组')
+            merged['战功总量_早'] = pd.to_numeric(merged['战功总量_早'], errors='coerce').fillna(0)
+            merged['战功总量_晚'] = pd.to_numeric(merged['战功总量_晚'], errors='coerce').fillna(0)
+            merged['战功总量差值'] = (merged['战功总量_晚'] - merged['战功总量_早']).astype(int)
+
+            # Build output
+            result = merged[['成员', '分组', '战功总量差值']].copy()
+            # Sort by group (asc) then diff (desc)
+            result = result.sort_values(by=['分组', '战功总量差值'], ascending=[True, False]).reset_index(drop=True)
+
+            # Pack rows for return
+            rows: List[Dict[str, Any]] = result.to_dict(orient='records')
+            return {
+                'success': True,
+                'earlier': earlier_path,
+                'later': later_path,
+                'earlier_ts': earlier_ts.isoformat(sep=' '),
+                'later_ts': later_ts.isoformat(sep=' '),
+                'range': f"{earlier_ts} ~ {later_ts}",
+                'rows': rows
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    @staticmethod
+    def save_grouped_tables_as_images(
+        result_rows: List[Dict[str, Any]],
+        out_dir: str,
+        title_prefix: str,
+        high_delta_threshold: int = 5000,
+    ) -> List[str]:
+        """Render grouped result rows as table images (one PNG per 分组),
+        highlighting rows with 战功总量差值 > high_delta_threshold.
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.table import Table
+
+        # Font config for Chinese
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        os.makedirs(out_dir, exist_ok=True)
+        import pandas as pd
+        df = pd.DataFrame(result_rows)
+        saved_paths: List[str] = []
+        for group, subdf in df.groupby('分组', sort=True):
+            # Ensure per-group sorting by 差值降序
+            view = subdf[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+
+            # Figure size heuristic based on rows; allocate top padding for title
+            rows = len(view) + 1  # + header
+            cols = 2
+            cell_h = 0.42
+            cell_w = 2.8
+            top_pad_frac = 0.12  # reserve 12% height for title
+            fig_h = max(3.5, rows * cell_h)
+            fig_w = max(6.0, cols * cell_w)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            ax.axis('off')
+
+            # Place table within bbox leaving space on top for the title
+            the_table = ax.table(cellText=[[str(x) for x in row] for row in view.values],
+                                  colLabels=list(view.columns),
+                                  cellLoc='center',
+                                  loc='center',
+                                  bbox=[0.0, 0.0, 1.0, 1.0 - top_pad_frac])
+            the_table.auto_set_font_size(False)
+            the_table.set_fontsize(10)
+            the_table.scale(1, 1.15)
+
+            # Title above table region
+            ax.text(0.5, 1.0 - top_pad_frac/2, f"{title_prefix} - 分组: {group} (共{len(view)}人)",
+                    ha='center', va='center', transform=ax.transAxes, fontsize=12, fontweight='bold')
+
+            # Highlight by threshold: 战功总量差值 > high_delta_threshold
+            try:
+                high_rows = view.index[view['战功总量差值'] > int(high_delta_threshold)].tolist()
+                for i in high_rows:
+                    r = i + 1  # offset for header row
+                    for c in range(cols):
+                        cell = the_table[(r, c)]
+                        # Only change background color; keep borders same as non-highlighted cells
+                        cell.set_facecolor('#FFF4CC')
+            except Exception:
+                pass
+
+            # Additional highlight for zero-delta members using another color
+            try:
+                zero_rows = view.index[view['战功总量差值'] == 0].tolist()
+                for i in zero_rows:
+                    r = i + 1  # offset for header row
+                    for c in range(cols):
+                        cell = the_table[(r, c)]
+                        cell.set_facecolor('#E6F7FF')  # light blue for zero change
+            except Exception:
+                pass
+
+            safe_group = str(group).replace('/', '_').replace('\\', '_')
+            out_path = os.path.join(out_dir, f"{title_prefix}_分组_{safe_group}.png")
+            plt.savefig(out_path, bbox_inches='tight', dpi=200)
+            plt.close(fig)
+            saved_paths.append(out_path)
+        return saved_paths
+
+
+def _auto_find_two_csvs_in_test_data(root: str) -> Tuple[str, str]:
+    td = os.path.join(root, 'test_data')
+    if not os.path.isdir(td):
+        raise FileNotFoundError(f"未找到目录: {td}")
+    files = [os.path.join(td, f) for f in os.listdir(td) if f.lower().endswith('.csv')]
+    if len(files) < 2:
+        raise FileNotFoundError("test_data 中少于两个CSV文件")
+    # Prefer files with timestamp pattern; sort by parsed ts
+    def ts_or_min(path: str) -> datetime:
+        try:
+            return FileAnalyzer._parse_cn_timestamp_from_filename(path)
+        except Exception:
+            return datetime.min
+    files = sorted(files, key=ts_or_min)
+    return files[-2], files[-1]
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='同盟成员战功总量差值分析')
+    parser.add_argument('--file1', type=str, help='CSV文件1路径（含中文时间戳）')
+    parser.add_argument('--file2', type=str, help='CSV文件2路径（含中文时间戳）')
+    args = parser.parse_args()
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    f1, f2 = (args.file1, args.file2) if (args.file1 and args.file2) else _auto_find_two_csvs_in_test_data(root)
+
+    analyzer = FileAnalyzer()
+    out = analyzer.analyze_battle_merit_change(f1, f2)
+    if not out.get('success'):
+        print(f"分析失败: {out.get('error')}")
+        raise SystemExit(1)
+
+    print(f"时间范围: {out['earlier_ts']} -> {out['later_ts']}")
+    print(f"文件顺序: 早={os.path.basename(out['earlier'])} 晚={os.path.basename(out['later'])}")
+    print("结果（仅保留两边同时存在的成员）")
+    print("结果（成员, 战功总量差值, 分组），按分组与差值排序：")
+    for row in out['rows']:
+        print(f"{row['成员']}, {row['战功总量差值']}, {row['分组']}")
+
+    # Save grouped tables as images
+    title_prefix = f"战功差值_{out['earlier_ts'].replace(':','').replace(' ','_')}_至_{out['later_ts'].replace(':','').replace(' ','_')}"
+    out_dir = os.path.join(root, 'output')
+    # Allow override of high-delta threshold via env var (default 5000)
+    high_th = int(os.environ.get('HIGH_DELTA_THRESHOLD', '5000'))
+    pngs = FileAnalyzer.save_grouped_tables_as_images(out['rows'], out_dir, title_prefix, high_delta_threshold=high_th)
+    print("表格图片已生成：")
+    for p in pngs:
+        print(p)
+
+    # Optionally send via WeChat Work if credentials and target set
+    try:
+        # Try import dotenv lazily; ignore if not available
+        try:
+            from dotenv import load_dotenv  # type: ignore
+            load_dotenv()
+        except Exception:
+            pass
+
+        corp_id = os.environ.get('WECHAT_CORP_ID', '')
+        corp_secret = os.environ.get('WECHAT_CORP_SECRET', '')
+        agent_id = os.environ.get('WECHAT_AGENT_ID', '')
+        to_user = os.environ.get('WECHAT_TO_USER', '')
+
+        if to_user and corp_id and corp_secret and agent_id:
+            try:
+                from wechat_api import WeChatWorkAPI
+                api = WeChatWorkAPI(corp_id, corp_secret, agent_id)
+                print(f"开始推送到企业微信，目标: {to_user}")
+                for path in pngs:
+                    up = api.upload_image(path)
+                    if up.get('errcode') == 0 and up.get('media_id'):
+                        res = api.send_image_message(to_user, up['media_id'])
+                        print(f"发送图片: {os.path.basename(path)} -> {res}")
+                    else:
+                        print(f"上传失败: {path} -> {up}")
+            except Exception as e_send:
+                print(f"企业微信发送失败: {e_send}")
+        # Always generate a manifest regardless of sending outcome
+        manifest = {
+            'title': title_prefix,
+            'images': pngs,
+            'wecom_push': {
+                'corp_id_present': bool(corp_id),
+                'agent_id_present': bool(agent_id),
+                'to_user_present': bool(to_user)
+            },
+            'usage': '设置环境变量 WECHAT_CORP_ID, WECHAT_CORP_SECRET, WECHAT_AGENT_ID, WECHAT_TO_USER 可自动推送；否则可手动使用 wechat_api 发送。'
+        }
+        with open(os.path.join(out_dir, f"{title_prefix}_wecom_manifest.json"), 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        print("已生成WeCom消息清单JSON（包含发送配置提示）。")
+    except Exception as e:
+        print(f"企业微信推送步骤跳过/失败: {e}")
+

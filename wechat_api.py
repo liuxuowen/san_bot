@@ -73,6 +73,35 @@ class WeChatWorkAPI:
             return response.json()
         except Exception as e:
             return {"errcode": -1, "errmsg": str(e)}
+
+    def upload_image(self, file_path: str) -> Dict[str, Any]:
+        """Upload image file and return media_id on success."""
+        access_token = self.get_access_token()
+        url = f"{self.base_url}/media/upload?access_token={access_token}&type=image"
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'media': (file_path, f, 'image/png')}
+                response = requests.post(url, files=files, timeout=30)
+                return response.json()
+        except Exception as e:
+            return {"errcode": -1, "errmsg": str(e)}
+
+    def send_image_message(self, user_id: str, media_id: str) -> Dict[str, Any]:
+        """Send an image message by media_id."""
+        access_token = self.get_access_token()
+        url = f"{self.base_url}/message/send?access_token={access_token}"
+        data = {
+            "touser": user_id,
+            "msgtype": "image",
+            "agentid": self.agent_id,
+            "image": {"media_id": media_id},
+            "safe": 0
+        }
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            return response.json()
+        except Exception as e:
+            return {"errcode": -1, "errmsg": str(e)}
     
     def download_media(self, media_id: str, save_path: str) -> bool:
         """Download media file from WeChat Work"""
