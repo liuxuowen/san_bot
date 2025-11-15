@@ -239,10 +239,13 @@ class FileAnalyzer:
         result_rows: List[Dict[str, Any]],
         out_dir: str,
         title_prefix: str,
+        display_title: str,
         high_delta_threshold: int = 5000,
     ) -> List[str]:
         """Render grouped result rows as table images (one PNG per 分组),
         highlighting rows with 战功总量差值 > high_delta_threshold.
+        display_title: human-readable title (dates may contain '/') used in figure, while
+        title_prefix is used for filename construction (kept filesystem-safe).
         """
         import matplotlib
         matplotlib.use('Agg')
@@ -257,7 +260,13 @@ class FileAnalyzer:
         import pandas as pd
         df = pd.DataFrame(result_rows)
         saved_paths: List[str] = []
+        # Prepare aggregation stats (excluding '未分组')
+        group_stats: List[Dict[str, Any]] = []
+
         for group, subdf in df.groupby('分组', sort=True):
+            # Skip '未分组' for statistics and per-group image generation
+            if str(group) == '未分组':
+                continue
             # Ensure per-group sorting by 差值降序
             view = subdf[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
 
@@ -266,7 +275,7 @@ class FileAnalyzer:
             cols = 2
             cell_h = 0.42
             cell_w = 2.8
-            top_pad_frac = 0.12  # reserve 12% height for title
+            top_pad_frac = 0.18  # more space for two-line title
             fig_h = max(3.5, rows * cell_h)
             fig_w = max(6.0, cols * cell_w)
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
@@ -282,9 +291,10 @@ class FileAnalyzer:
             the_table.set_fontsize(10)
             the_table.scale(1, 1.15)
 
-            # Title above table region
-            ax.text(0.5, 1.0 - top_pad_frac/2, f"{title_prefix} - 分组: {group} (共{len(view)}人)",
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12, fontweight='bold')
+            # Title above table region - multi-line
+            title_text = f"{display_title}\n{group} 组 ({len(view)})"
+            ax.text(0.5, 1.0 - top_pad_frac/2, title_text,
+                    ha='center', va='center', transform=ax.transAxes, fontsize=12, fontweight='bold', linespacing=1.3)
 
             # Highlight by threshold: 战功总量差值 > high_delta_threshold
             try:
@@ -314,6 +324,48 @@ class FileAnalyzer:
             plt.savefig(out_path, bbox_inches='tight', dpi=200)
             plt.close(fig)
             saved_paths.append(out_path)
+
+            # Collect aggregation metrics
+            total_count = len(view)
+            avg_delta = float(view['战功总量差值'].mean()) if total_count else 0.0
+            zero_count = int((view['战功总量差值'] == 0).sum())
+            group_stats.append({
+                '分组名称': group,
+                '有效成员人数': total_count,
+                '平均战功差值': round(avg_delta, 2),
+                '狗混子人数': zero_count
+            })
+
+        # Create aggregated stats image if any stats collected
+        if group_stats:
+            stats_df = pd.DataFrame(group_stats)
+            # Sort by 平均战功差值 desc
+            stats_df = stats_df.sort_values('平均战功差值', ascending=False).reset_index(drop=True)
+
+            rows = len(stats_df) + 1
+            cols = len(stats_df.columns)
+            cell_h = 0.42
+            cell_w = 1.6
+            top_pad_frac = 0.15
+            fig_h = max(3.0, rows * cell_h)
+            fig_w = max(8.0, cols * cell_w)
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            ax.axis('off')
+            table = ax.table(cellText=[[str(x) for x in row] for row in stats_df.values],
+                             colLabels=list(stats_df.columns),
+                             cellLoc='center',
+                             loc='center',
+                             bbox=[0.0, 0.0, 1.0, 1.0 - top_pad_frac])
+            table.auto_set_font_size(False)
+            table.set_fontsize(10)
+            table.scale(1, 1.15)
+            ax.text(0.5, 1.0 - top_pad_frac/2,
+                    f"{display_title} 分组汇总",
+                    ha='center', va='center', transform=ax.transAxes, fontsize=13, fontweight='bold')
+            agg_path = os.path.join(out_dir, f"{title_prefix}_分组统计汇总.png")
+            plt.savefig(agg_path, bbox_inches='tight', dpi=200)
+            plt.close(fig)
+            saved_paths.append(agg_path)
         return saved_paths
 
 
@@ -357,12 +409,32 @@ if __name__ == '__main__':
     for row in out['rows']:
         print(f"{row['成员']}, {row['战功总量差值']}, {row['分组']}")
 
-    # Save grouped tables as images
-    title_prefix = f"战功差值_{out['earlier_ts'].replace(':','').replace(' ','_')}_至_{out['later_ts'].replace(':','').replace(' ','_')}"
+    # Save grouped tables as images (truncate timestamps to minute resolution for title)
+    def _trim_seconds(ts_str: str) -> str:
+        parts = ts_str.strip().split(' ')
+        if len(parts) == 2 and parts[1].count(':') == 2:
+            date_part, time_part = parts
+            hh_mm = ':'.join(time_part.split(':')[:2])
+            return f"{date_part} {hh_mm}"
+        return ts_str
+    earlier_no_sec = _trim_seconds(out['earlier_ts'])
+    later_no_sec = _trim_seconds(out['later_ts'])
+    title_prefix = f"战功统计_{earlier_no_sec.replace(':','').replace(' ','_')}_至_{later_no_sec.replace(':','').replace(' ','_')}"
+    # Display title with slash-style date (YYYY/MM/DD HH:MM) and without seconds
+    def _slash_fmt(ts: str) -> str:
+        parts = ts.split(' ')
+        if len(parts) == 2:
+            d, hm = parts
+            d_parts = d.split('-')
+            if len(d_parts) == 3:
+                d = '/'.join(d_parts)  # YYYY/MM/DD
+            return f"{d} {hm}"
+        return ts
+    display_title = f"战功统计 { _slash_fmt(earlier_no_sec) } → { _slash_fmt(later_no_sec) }"
     out_dir = os.path.join(root, 'output')
     # Allow override of high-delta threshold via env var (default 5000)
     high_th = int(os.environ.get('HIGH_DELTA_THRESHOLD', '5000'))
-    pngs = FileAnalyzer.save_grouped_tables_as_images(out['rows'], out_dir, title_prefix, high_delta_threshold=high_th)
+    pngs = FileAnalyzer.save_grouped_tables_as_images(out['rows'], out_dir, title_prefix, display_title, high_delta_threshold=high_th)
     print("表格图片已生成：")
     for p in pngs:
         print(p)

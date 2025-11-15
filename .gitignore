@@ -50,3 +50,6 @@ temp/
 # OS
 .DS_Store
 Thumbs.db
+
+# output data
+output/
