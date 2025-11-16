@@ -86,7 +86,8 @@ def create_app(config_name='default'):
             elif msg_type == 'file':
                 # Handle file upload
                 media_id = message.get('MediaId', '')
-                file_name = message.get('Title', 'unknown_file')
+                # WeCom may use FileName or Title depending on type
+                file_name = message.get('FileName') or message.get('Title') or 'unknown_file'
                 
                 # Initialize session if not exists
                 if from_user not in file_sessions:
@@ -112,23 +113,64 @@ def create_app(config_name='default'):
                             f"已收到文件 {files_count}/2，请继续上传第二个文件。"
                         )
                     elif files_count == 2:
-                        # Perform analysis
-                        instruction = file_sessions[from_user]['instruction']
-                        file1 = file_sessions[from_user]['files'][0]
-                        file2 = file_sessions[from_user]['files'][1]
-                        
-                        result = file_analyzer.analyze_files(file1, file2, instruction)
-                        
-                        # Send report
-                        wechat_api.send_text_message(from_user, result['report'])
-                        
-                        # Clean up
-                        for f in file_sessions[from_user]['files']:
+                        # Run analysis in background thread to avoid callback timeout
+                        import threading
+                        file1, file2 = file_sessions[from_user]['files']
+
+                        def _do_analysis_and_reply(u: str, f1: str, f2: str, session_key: str):
                             try:
-                                os.remove(f)
-                            except:
-                                pass
-                        del file_sessions[from_user]
+                                if f1.lower().endswith('.csv') and f2.lower().endswith('.csv'):
+                                    out = file_analyzer.analyze_battle_merit_change(f1, f2)
+                                    if out.get('success'):
+                                        def _trim_seconds(ts_str: str) -> str:
+                                            parts = ts_str.strip().split(' ')
+                                            if len(parts) == 2 and parts[1].count(':') == 2:
+                                                date_part, time_part = parts
+                                                hh_mm = ':'.join(time_part.split(':')[:2])
+                                                return f"{date_part} {hh_mm}"
+                                            return ts_str
+                                        earlier_no_sec = _trim_seconds(out['earlier_ts'])
+                                        later_no_sec = _trim_seconds(out['later_ts'])
+                                        title_prefix = f"战功统计_{earlier_no_sec.replace(':','').replace(' ','_')}_至_{later_no_sec.replace(':','').replace(' ','_')}"
+                                        def _slash_fmt(ts: str) -> str:
+                                            parts = ts.split(' ')
+                                            if len(parts) == 2:
+                                                d, hm = parts
+                                                d_parts = d.split('-')
+                                                if len(d_parts) == 3:
+                                                    d = '/'.join(d_parts)
+                                                return f"{d} {hm}"
+                                            return ts
+                                        display_title = f"战功统计 { _slash_fmt(earlier_no_sec) } → { _slash_fmt(later_no_sec) }"
+                                        out_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'output')
+                                        os.makedirs(out_dir, exist_ok=True)
+                                        high_th = int(os.environ.get('HIGH_DELTA_THRESHOLD', '5000'))
+                                        pngs = FileAnalyzer.save_grouped_tables_as_images(out['rows'], out_dir, title_prefix, display_title, high_delta_threshold=high_th)
+                                        if pngs:
+                                            wechat_api.send_text_message(u, f"分析完成，共生成{len(pngs)}张分组图片，即将发送…")
+                                            for p in pngs:
+                                                up = wechat_api.upload_image(p)
+                                                if up.get('errcode') == 0 and up.get('media_id'):
+                                                    wechat_api.send_image_message(u, up['media_id'])
+                                            return
+                                # Fallback generic diff
+                                instruction = file_sessions.get(session_key, {}).get('instruction', '对比两个文件的差异')
+                                result = file_analyzer.analyze_files(f1, f2, instruction)
+                                wechat_api.send_text_message(u, result.get('report', '分析完成。'))
+                            except Exception as e:
+                                wechat_api.send_text_message(u, f"分析失败: {e}")
+                            finally:
+                                # Clean up files and session
+                                sess = file_sessions.pop(session_key, None)
+                                if sess and 'files' in sess:
+                                    for f in sess['files']:
+                                        try:
+                                            os.remove(f)
+                                        except:
+                                            pass
+
+                        wechat_api.send_text_message(from_user, "已收到两份文件，开始分析处理，请稍候…")
+                        threading.Thread(target=_do_analysis_and_reply, args=(from_user, file1, file2, from_user), daemon=True).start()
                 else:
                     wechat_api.send_text_message(from_user, "文件下载失败，请重试。")
             

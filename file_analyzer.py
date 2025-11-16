@@ -242,104 +242,213 @@ class FileAnalyzer:
         display_title: str,
         high_delta_threshold: int = 5000,
     ) -> List[str]:
-        """Render grouped result rows as table images (one PNG per 分组),
-        highlighting rows with 战功总量差值 > high_delta_threshold.
-        display_title: human-readable title (dates may contain '/') used in figure, while
-        title_prefix is used for filename construction (kept filesystem-safe).
-        """
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib.table import Table
-
-        # Font config for Chinese
-        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-        plt.rcParams['axes.unicode_minus'] = False
+        import random
+        import math
+        from PIL import Image, ImageDraw, ImageFont
 
         os.makedirs(out_dir, exist_ok=True)
         import pandas as pd
         df = pd.DataFrame(result_rows)
-        saved_paths: List[str] = []
-        # Prepare aggregation stats (excluding '未分组')
-        group_stats: List[Dict[str, Any]] = []
+        if df.empty:
+            return []
 
+        header_path = os.path.join(os.path.dirname(__file__), 'resources', 'header2.jpg')
+        header_img = Image.open(header_path).convert('RGBA')
+        header_w, header_h = header_img.size
+        tile_height = 100
+        header_tile = header_img.crop((0, 0, header_w, tile_height))
+
+        def load_font(size: int) -> "ImageFont.ImageFont":
+            for font_name in ("msyh.ttc", "msyh.ttf", "simhei.ttf"):
+                try:
+                    return ImageFont.truetype(font_name, size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        def measure_height(font: "ImageFont.ImageFont", text: str) -> float:
+            try:
+                bbox = font.getbbox(text)
+                return float(bbox[3] - bbox[1])
+            except Exception:
+                return float(font.size if hasattr(font, 'size') else 0)
+
+        def ensure_canvas(min_height: int) -> "Image.Image":
+            if header_img.height >= min_height:
+                return header_img.copy()
+            blocks = math.ceil((min_height - header_img.height) / tile_height)
+            canvas = Image.new('RGBA', (header_w, header_img.height + blocks * tile_height))
+            canvas.paste(header_img, (0, 0))
+            for i in range(blocks):
+                canvas.paste(header_tile, (0, header_img.height + i * tile_height))
+            return canvas
+
+        def wrap_text(text: str, font: "ImageFont.ImageFont", max_width: int) -> List[str]:
+            lines: List[str] = []
+            current = ''
+            for ch in text:
+                candidate = current + ch
+                try:
+                    bbox = font.getbbox(candidate)
+                    width = bbox[2] - bbox[0]
+                except Exception:
+                    width = len(candidate) * (font.size if hasattr(font, 'size') else 10)
+                if current and width > max_width:
+                    lines.append(current)
+                    current = ch
+                else:
+                    current = candidate
+            if current:
+                lines.append(current)
+            return lines
+
+        groups_to_render: List[Tuple[str, pd.DataFrame]] = []
+        all_view = df[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+        groups_to_render.append(('全盟', all_view))
         for group, subdf in df.groupby('分组', sort=True):
-            # Skip '未分组' for statistics and per-group image generation
             if str(group) == '未分组':
                 continue
-            # Ensure per-group sorting by 差值降序
-            view = subdf[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+            group_view = subdf[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+            groups_to_render.append((str(group), group_view))
 
-            # Figure size heuristic based on rows; allocate top padding for title
-            rows = len(view) + 1  # + header
-            cols = 2
-            cell_h = 0.42
-            cell_w = 2.8
-            top_pad_frac = 0.18  # more space for two-line title
-            fig_h = max(3.5, rows * cell_h)
-            fig_w = max(6.0, cols * cell_w)
-            fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-            ax.axis('off')
+        idioms_path = os.path.join(os.path.dirname(__file__), 'resources', 'idioms100.json')
+        try:
+            with open(idioms_path, 'r', encoding='utf-8') as f:
+                idioms_json = json.load(f)
+                if isinstance(idioms_json, dict) and '三国成语大全' in idioms_json:
+                    idioms_list = idioms_json['三国成语大全']
+                else:
+                    idioms_list = idioms_json if isinstance(idioms_json, list) else []
+        except Exception:
+            idioms_list = []
 
-            # Place table within bbox leaving space on top for the title
-            the_table = ax.table(cellText=[[str(x) for x in row] for row in view.values],
-                                  colLabels=list(view.columns),
-                                  cellLoc='center',
-                                  loc='center',
-                                  bbox=[0.0, 0.0, 1.0, 1.0 - top_pad_frac])
-            the_table.auto_set_font_size(False)
-            the_table.set_fontsize(10)
-            the_table.scale(1, 1.15)
+        title_font = load_font(32)
+        group_font = load_font(60)
+        table_font = load_font(28)
+        idiom_body_font = load_font(40)
+        idiom_title_font = load_font(44)
 
-            # Title above table region - multi-line
-            title_text = f"{display_title}\n{group} 组 ({len(view)})"
-            ax.text(0.5, 1.0 - top_pad_frac/2, title_text,
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12, fontweight='bold', linespacing=1.3)
+        table_line_height = max(int(measure_height(table_font, '字')), 28)
+        row_height_base = table_line_height + 18
+        idiom_body_height = max(int(measure_height(idiom_body_font, '字')), 40)
 
-            # Highlight by threshold: 战功总量差值 > high_delta_threshold
-            try:
-                high_rows = view.index[view['战功总量差值'] > int(high_delta_threshold)].tolist()
-                for i in high_rows:
-                    r = i + 1  # offset for header row
-                    for c in range(cols):
-                        cell = the_table[(r, c)]
-                        # Only change background color; keep borders same as non-highlighted cells
-                        cell.set_facecolor('#FFF4CC')
-            except Exception:
-                pass
+        HEADER_BOTTOM_GAP = 50
+        TITLE_GAP = 80
+        GROUP_TITLE_GAP = 50
+        TABLE_BOTTOM_PADDING = 80
+        IDIOM_TOP_PADDING = 20
+        IDIOM_BOTTOM_PADDING = 40
+        IDIOM_LINE_SPACING = 12
+        TABLE_WIDTH_RATIO = 0.72
 
-            # Additional highlight for zero-delta members using another color
-            try:
-                zero_rows = view.index[view['战功总量差值'] == 0].tolist()
-                for i in zero_rows:
-                    r = i + 1  # offset for header row
-                    for c in range(cols):
-                        cell = the_table[(r, c)]
-                        cell.set_facecolor('#E6F7FF')  # light blue for zero change
-            except Exception:
-                pass
+        saved_paths: List[str] = []
+        group_stats: List[Dict[str, Any]] = []
 
-            safe_group = str(group).replace('/', '_').replace('\\', '_')
+        for group, view in groups_to_render:
+            group_label = '全盟' if group == '全盟' else f"{group} 组"
+            table_rows = len(view)
+            table_height = (table_rows + 1) * row_height_base + TABLE_BOTTOM_PADDING
+
+            idiom_title_text = ''
+            idiom_story_lines: List[str] = []
+            if idioms_list:
+                idiom_entry = random.choice(idioms_list)
+                if isinstance(idiom_entry, dict) and '成语' in idiom_entry and '典故' in idiom_entry:
+                    idiom_title_text = f"学习文化 - 【{idiom_entry['成语']}】"
+                    idiom_story_lines = wrap_text(str(idiom_entry['典故']), idiom_body_font, header_w - 200)
+
+            title1_y = header_h + HEADER_BOTTOM_GAP
+            title1_h = measure_height(title_font, display_title)
+            title2_y = title1_y + title1_h + TITLE_GAP
+            title2_text = f"{group_label} ({len(view)})"
+            title2_h = measure_height(group_font, title2_text)
+            table_start_y = int(title2_y + title2_h + GROUP_TITLE_GAP)
+
+            idiom_section_height = 0
+            if idiom_title_text:
+                title_height = measure_height(idiom_title_font, idiom_title_text)
+                if idiom_story_lines:
+                    story_height = len(idiom_story_lines) * idiom_body_height + (len(idiom_story_lines) - 1) * IDIOM_LINE_SPACING
+                else:
+                    story_height = 0
+                idiom_section_height = IDIOM_TOP_PADDING + title_height + (IDIOM_LINE_SPACING if story_height else 0) + story_height + IDIOM_BOTTOM_PADDING
+
+            required_height = table_start_y + table_height + idiom_section_height
+            canvas = ensure_canvas(required_height)
+            draw = ImageDraw.Draw(canvas)
+            img_w = canvas.width
+
+            draw.text((img_w // 2, title1_y), display_title, font=title_font, fill=(0, 0, 0, 255), anchor="mm")
+            draw.text((img_w // 2, title2_y), title2_text, font=group_font, fill=(0, 0, 0, 255), anchor="mm")
+
+            table_total_width = img_w * TABLE_WIDTH_RATIO
+            cell_width = table_total_width / 2
+            table_left = (img_w - table_total_width) / 2
+            header_y = table_start_y
+            header_center_y = header_y + row_height_base / 2
+            col_centers = [table_left + cell_width / 2, table_left + 1.5 * cell_width]
+            col_titles = ["成员", "战功总量差值"]
+
+            for idx, title in enumerate(col_titles):
+                draw.text((col_centers[idx], header_center_y), title, font=table_font, fill=(40, 40, 40, 255), anchor="mm")
+                cell_left = table_left + idx * cell_width
+                x0 = int(round(cell_left))
+                x1 = int(round(cell_left + cell_width))
+                y0 = int(round(header_y))
+                y1 = int(round(header_y + row_height_base))
+                draw.rectangle([x0, y0, x1, y1], outline=(80, 80, 80, 255), width=2)
+
+            for row_idx, (member, delta) in enumerate(view[['成员', '战功总量差值']].itertuples(index=False, name=None)):
+                row_top = table_start_y + (row_idx + 1) * row_height_base
+                y_top = int(round(row_top))
+                y_bottom = int(round(row_top + row_height_base))
+                y_center = row_top + row_height_base / 2
+                highlight_orange = delta == 0
+                highlight_green = delta > high_delta_threshold
+                for col_idx, value in enumerate((member, delta)):
+                    cell_left = table_left + col_idx * cell_width
+                    x0 = int(round(cell_left))
+                    x1 = int(round(cell_left + cell_width))
+                    if highlight_orange:
+                        draw.rectangle([x0, y_top, x1, y_bottom], fill=(255, 140, 0, 180))
+                    elif highlight_green:
+                        draw.rectangle([x0, y_top, x1, y_bottom], fill=(144, 238, 144, 180))
+                    draw.rectangle([x0, y_top, x1, y_bottom], outline=(120, 120, 120, 255), width=1)
+                    draw.text((col_centers[col_idx], y_center), str(value), font=table_font, fill=(0, 0, 0, 255), anchor="mm")
+
+            if idiom_title_text:
+                idiom_top = table_start_y + table_height + IDIOM_TOP_PADDING
+                title_height = measure_height(idiom_title_font, idiom_title_text)
+                draw.text((img_w // 2, idiom_top + title_height / 2), idiom_title_text, font=idiom_title_font, fill=(60, 60, 60, 255), anchor="mm")
+                story_start_y = idiom_top + title_height + (IDIOM_LINE_SPACING if idiom_story_lines else 0)
+                for idx, line in enumerate(idiom_story_lines):
+                    y_pos = story_start_y + idx * (idiom_body_height + IDIOM_LINE_SPACING)
+                    draw.text((100, y_pos), line, font=idiom_body_font, fill=(60, 60, 60, 255), anchor="la")
+
+            safe_group = group.replace('/', '_').replace('\\', '_')
             out_path = os.path.join(out_dir, f"{title_prefix}_分组_{safe_group}.png")
-            plt.savefig(out_path, bbox_inches='tight', dpi=200)
-            plt.close(fig)
+            canvas.save(out_path)
             saved_paths.append(out_path)
 
-            # Collect aggregation metrics
-            total_count = len(view)
-            avg_delta = float(view['战功总量差值'].mean()) if total_count else 0.0
-            zero_count = int((view['战功总量差值'] == 0).sum())
-            group_stats.append({
-                '分组名称': group,
-                '有效成员人数': total_count,
-                '平均战功差值': round(avg_delta, 2),
-                '狗混子人数': zero_count
-            })
+            if group != '全盟' and not view.empty:
+                avg_delta = float(view['战功总量差值'].mean())
+                zero_count = int((view['战功总量差值'] == 0).sum())
+                group_stats.append({
+                    '分组名称': group,
+                    '有效成员人数': len(view),
+                    '平均战功差值': round(avg_delta, 2),
+                    '狗混子人数': zero_count
+                })
 
-        # Create aggregated stats image if any stats collected
         if group_stats:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+            plt.rcParams['axes.unicode_minus'] = False
+
             stats_df = pd.DataFrame(group_stats)
-            # Sort by 平均战功差值 desc
             stats_df = stats_df.sort_values('平均战功差值', ascending=False).reset_index(drop=True)
 
             rows = len(stats_df) + 1
@@ -366,6 +475,7 @@ class FileAnalyzer:
             plt.savefig(agg_path, bbox_inches='tight', dpi=200)
             plt.close(fig)
             saved_paths.append(agg_path)
+
         return saved_paths
 
 
