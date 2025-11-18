@@ -188,11 +188,44 @@ def get_upload_with_members(cfg: Mapping[str, Any], user_openid: str, upload_id:
                 """
                 SELECT member_name, contrib_rank, contrib_total, battle_total, assist_total,
                        donate_total, power_value, group_name
-                FROM upload_members WHERE upload_id=%s ORDER BY contrib_total DESC, member_name ASC
+                FROM upload_members WHERE upload_id=%s ORDER BY battle_total DESC, member_name ASC
                 """,
                 (int(upload_id),),
             )
             members = cur.fetchall() or []
         return upload_row, list(members)
+    finally:
+        conn.close()
+
+
+def get_member_history(cfg: Mapping[str, Any], user_openid: str, member_name: str) -> list[dict[str, Any]]:
+    """Return time series entries for a specific member owned by the user ordered by upload ts."""
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    u.id AS upload_id,
+                    u.ts,
+                    u.created_at,
+                    u.member_count,
+                    m.member_name,
+                    m.contrib_rank,
+                    m.contrib_total,
+                    m.battle_total,
+                    m.assist_total,
+                    m.donate_total,
+                    m.power_value,
+                    m.group_name
+                FROM uploads AS u
+                JOIN upload_members AS m ON m.upload_id = u.id
+                WHERE u.user_openid = %s AND m.member_name = %s
+                ORDER BY u.ts ASC, u.id ASC
+                """,
+                (user_openid, member_name),
+            )
+            rows = cur.fetchall() or []
+        return list(rows)
     finally:
         conn.close()

@@ -63,7 +63,7 @@ def create_app(config_name: str = "default") -> Flask:
             token=app.config["FUWUHAO_TOKEN"],
             encoding_aes_key=app.config.get("FUWUHAO_ENCODING_AES_KEY", ""),
         )
-        service_bp = create_service_blueprint(app.config, file_analyzer, service_api, session_store)
+        service_bp = create_service_blueprint(app.config, service_api)
         app.register_blueprint(service_bp, url_prefix="/sanbot/service")
         detail_bp = create_upload_detail_blueprint(app.config)
         app.register_blueprint(detail_bp, url_prefix="/sanbot/service")

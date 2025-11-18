@@ -5,10 +5,30 @@ import os
 import re
 import json
 import difflib
+import random
 from datetime import datetime
 from typing import Tuple, Dict, Any, List
 
 import pandas as pd
+
+
+def _load_font(size: int) -> object:
+    from PIL import ImageFont
+
+    candidates = (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    )
+    for font_name in candidates:
+        try:
+            return ImageFont.truetype(font_name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
 
 class FileAnalyzer:
@@ -209,6 +229,413 @@ class FileAnalyzer:
         df = df.sort_values(metric_column).drop_duplicates(subset=['成员'], keep='last').reset_index(drop=True)
         return df
 
+    @staticmethod
+    def _calculate_member_metric_diff(
+        df_early: pd.DataFrame,
+        df_late: pd.DataFrame,
+        metric_column: str,
+        metric_display_name: str,
+    ) -> Dict[str, Any]:
+        required_cols = {'成员', metric_column, '分组'}
+        if not required_cols.issubset(df_early.columns) or not required_cols.issubset(df_late.columns):
+            missing = required_cols - set(df_early.columns)
+            missing |= required_cols - set(df_late.columns)
+            raise ValueError(f"成员数据缺少必要列: {', '.join(sorted(missing))}")
+
+        early = df_early.rename(columns={metric_column: 'metric_early', '分组': '分组_早'}).copy()
+        late = df_late.rename(columns={metric_column: 'metric_late', '分组': '分组_晚'}).copy()
+
+        merged = pd.merge(early, late, on='成员', how='inner')
+        if merged.empty:
+            return {
+                'success': True,
+                'rows': [],
+                'value_field': f"{metric_display_name}差值",
+                'value_label': metric_display_name,
+            }
+
+        merged['分组'] = merged['分组_晚'].fillna(merged['分组_早']).replace({'': '未分组'}).fillna('未分组')
+        merged['metric_early'] = pd.to_numeric(merged['metric_early'], errors='coerce').fillna(0)
+        merged['metric_late'] = pd.to_numeric(merged['metric_late'], errors='coerce').fillna(0)
+        merged['metric_diff'] = (merged['metric_late'] - merged['metric_early']).astype(int)
+
+        metric_field = f"{metric_display_name}差值"
+        result = (
+            merged[['成员', '分组', 'metric_diff']]
+            .rename(columns={'metric_diff': metric_field})
+            .sort_values(by=['分组', metric_field], ascending=[True, False])
+            .reset_index(drop=True)
+        )
+        rows: List[Dict[str, Any]] = result.to_dict(orient='records')
+        return {
+            'success': True,
+            'rows': rows,
+            'value_field': metric_field,
+            'value_label': metric_display_name,
+        }
+
+    @staticmethod
+    def _coerce_datetime(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(value)
+            except Exception:
+                return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            candidates = [
+                text,
+                text.replace("/", "-") if "/" in text else text,
+            ]
+            formats = [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S",
+                "%Y/%m/%d %H:%M",
+                "%Y/%m/%d",
+            ]
+            for candidate in candidates:
+                try:
+                    return datetime.fromisoformat(candidate)
+                except Exception:
+                    for fmt in formats:
+                        try:
+                            return datetime.strptime(candidate, fmt)
+                        except Exception:
+                            continue
+            return None
+        return None
+
+    @classmethod
+    def _format_ts_shichen(cls, value) -> str:
+        dt = cls._coerce_datetime(value)
+        if not dt:
+            return ""
+        hour = dt.hour
+        shichen_map = {
+            23: "子",
+            0: "子",
+            1: "丑",
+            2: "丑",
+            3: "寅",
+            4: "寅",
+            5: "卯",
+            6: "卯",
+            7: "辰",
+            8: "辰",
+            9: "巳",
+            10: "巳",
+            11: "午",
+            12: "午",
+            13: "未",
+            14: "未",
+            15: "申",
+            16: "申",
+            17: "酉",
+            18: "酉",
+            19: "戌",
+            20: "戌",
+            21: "亥",
+            22: "亥",
+        }
+        shichen = shichen_map.get(hour, "子")
+        return f"{dt.year}年{dt.month}月{dt.day}日{shichen}时"
+
+    def save_compare_group_images(
+        self,
+        rows: List[Dict[str, Any]],
+        value_field: str,
+        metric_label: str,
+        earlier_ts,
+        later_ts,
+        output_dir: str,
+        header_path: str,
+    ) -> List[Dict[str, Any]]:
+        from uuid import uuid4
+        from PIL import Image, ImageDraw
+
+        os.makedirs(output_dir, exist_ok=True)
+        try:
+            header_img = Image.open(header_path).convert('RGB')
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"缺少头图文件：{header_path}") from exc
+
+        target_width = 600
+        resample_attr = getattr(Image, "Resampling", None)
+        resample_filter = resample_attr.LANCZOS if resample_attr else getattr(Image, "LANCZOS", Image.BICUBIC)
+        if header_img.width != target_width:
+            scale = target_width / header_img.width
+            new_height = max(1, int(header_img.height * scale))
+            header_img = header_img.resize((target_width, new_height), resample_filter)
+
+        width = target_width
+        header_height = header_img.height
+        top_margin = 0
+        content_bg = (255, 248, 220)
+        header_row_bg = (255, 236, 196)
+        alternate_row_bg = (242, 244, 248)
+        text_primary = (48, 55, 65)
+        text_muted = (90, 99, 117)
+        positive_color = (200, 21, 35)
+        negative_color = (24, 102, 54)
+        highlight_high_bg = (255, 230, 180)
+        highlight_zero_bg = (207, 224, 255)
+        member_text_color = (70, 94, 122)
+
+        try:
+            high_threshold = int(os.environ.get("HIGH_DELTA_THRESHOLD", "5000"))
+        except ValueError:
+            high_threshold = 5000
+
+        title_font = _load_font(22)
+        table_header_font = _load_font(26)
+        table_font = _load_font(24)
+        idiom_title_font = _load_font(22)
+        idiom_body_font = _load_font(20)
+
+        def measure(font, text: str) -> tuple[int, int]:
+            try:
+                bbox = font.getbbox(text)
+                return bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except Exception:
+                size = getattr(font, 'size', 24)
+                return len(text) * size, size
+
+        def wrap_text(font, text: str, max_width: int) -> list[str]:
+            if not text:
+                return []
+            lines: list[str] = []
+            current = ""
+            for ch in text:
+                candidate = current + ch
+                width, _ = measure(font, candidate)
+                if current and width > max_width:
+                    lines.append(current)
+                    current = ch
+                else:
+                    current = candidate
+            if current:
+                lines.append(current)
+            return lines
+
+        title_line_height = measure(title_font, '字')[1]
+        header_line_height = measure(table_header_font, '字')[1]
+        row_line_height = measure(table_font, '字')[1]
+
+        padding_x = 36
+        padding_bottom = 72
+        title_gap = 44
+        table_gap = 24
+        row_height = row_line_height + 18
+        header_height_content = header_line_height + 18
+
+        earlier_label = self._format_ts_shichen(earlier_ts) or self._format_ts_shichen(earlier_ts or '')
+        later_label = self._format_ts_shichen(later_ts) or self._format_ts_shichen(later_ts or '')
+
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            group_name = str(row.get('分组', '')).strip() or '未分组'
+            groups.setdefault(group_name, []).append(row)
+
+        image_results: List[Dict[str, Any]] = []
+
+        if not groups:
+            return image_results
+
+        import re
+
+        table_left = padding_x
+        table_right = width - padding_x
+        index_col_width = 60
+        value_col_width = 190
+        max_text_width = width - 2 * padding_x
+        metric_text = metric_label or value_field
+        is_battle_metric = "战功" in metric_text
+        is_contrib_metric = "贡献" in metric_text
+
+        idioms_list: list[dict[str, str]] = []
+        idioms_path = os.path.join(os.path.dirname(header_path), "idioms100.json")
+        try:
+            with open(idioms_path, "r", encoding="utf-8") as idiom_file:
+                idioms_raw = json.load(idiom_file)
+                if isinstance(idioms_raw, dict) and "三国成语大全" in idioms_raw:
+                    source = idioms_raw.get("三国成语大全", [])
+                else:
+                    source = idioms_raw if isinstance(idioms_raw, list) else []
+                idioms_list = [entry for entry in source if isinstance(entry, dict)]
+        except Exception:
+            idioms_list = []
+
+        def render_group_image(group_name: str, group_rows: List[Dict[str, Any]]) -> None:
+            if not group_rows:
+                return
+            ordered_rows = sorted(group_rows, key=lambda r: int(r.get(value_field, 0)), reverse=True)
+            rows_count = len(ordered_rows)
+
+            idiom_entry = random.choice(idioms_list) if idioms_list else None
+            idiom_lines: list[tuple[object, str]] = []
+            if idiom_entry:
+                idiom_phrase = str(idiom_entry.get('成语', '')).strip()
+                idiom_story = str(idiom_entry.get('典故', '')).strip()
+                if idiom_phrase:
+                    idiom_lines.append((idiom_title_font, f"成语：{idiom_phrase}"))
+                if idiom_story:
+                    story_lines = wrap_text(idiom_body_font, f"典故：{idiom_story}", max_text_width)
+                    idiom_lines.extend((idiom_body_font, line) for line in story_lines)
+
+            idiom_top_padding = 24 if idiom_lines else 0
+            idiom_bottom_padding = 18 if idiom_lines else 0
+            idiom_line_gap = 6
+            idiom_block_height = idiom_top_padding + idiom_bottom_padding
+            for idx, (font_obj, _) in enumerate(idiom_lines):
+                line_height = measure(font_obj, '字')[1]
+                idiom_block_height += line_height
+                if idx < len(idiom_lines) - 1:
+                    idiom_block_height += idiom_line_gap
+
+            content_height = (
+                title_gap
+                + title_line_height
+                + table_gap
+                + header_height_content
+                + rows_count * row_height
+                + idiom_block_height
+                + padding_bottom
+            )
+
+            image_height = top_margin + header_height + content_height
+            image = Image.new('RGB', (width, image_height), content_bg)
+            image.paste(header_img, (0, top_margin))
+            draw = ImageDraw.Draw(image)
+
+            title_y = top_margin + header_height + title_gap
+            group_label = group_name
+            if group_label == '未分组':
+                group_label = '未分组成员'
+            title_text = f"{group_label} | {earlier_label} → {later_label}"
+            draw.text((padding_x, title_y), title_text, font=title_font, fill=text_primary)
+
+            table_top = title_y + title_line_height + table_gap
+
+            draw.rectangle([table_left, table_top, table_right, table_top + header_height_content], fill=header_row_bg)
+            header_center_y = table_top + header_height_content / 2
+            draw.text((table_left + 16, header_center_y), '#', font=table_header_font, fill=text_muted, anchor="lm")
+            member_col_left = table_left + index_col_width
+            member_col_right = table_right - value_col_width
+            member_center_x = (member_col_left + member_col_right) / 2
+            draw.text((member_center_x, header_center_y), '成员', font=table_header_font, fill=text_muted, anchor="mm")
+            value_center_x = table_right - value_col_width / 2
+            draw.text((value_center_x, header_center_y), metric_label, font=table_header_font, fill=text_muted, anchor="mm")
+
+            # horizontal line under header
+            draw.line([(table_left, table_top + header_height_content), (table_right, table_top + header_height_content)], fill=text_muted, width=2)
+
+            for idx, row in enumerate(ordered_rows, start=1):
+                row_top = table_top + header_height_content + (idx - 1) * row_height
+                row_bottom = row_top + row_height
+                row_fill = None
+
+                member = str(row.get('成员', '')).strip() or '-'
+                try:
+                    diff_value = int(row.get(value_field, 0))
+                except Exception:
+                    diff_value = 0
+                diff_text = f"{diff_value:+d}"
+
+                index_text = str(idx)
+                index_height = measure(table_font, index_text)[1]
+                member_height = measure(table_font, member)[1]
+                diff_width, diff_height = measure(table_font, diff_text)
+
+                if diff_value == 0 and (is_battle_metric or is_contrib_metric):
+                    row_fill = highlight_zero_bg
+                elif is_battle_metric and diff_value > high_threshold:
+                    row_fill = highlight_high_bg
+                elif idx % 2 == 0:
+                    row_fill = alternate_row_bg
+
+                if row_fill:
+                    draw.rectangle([table_left, row_top, table_right, row_bottom], fill=row_fill)
+
+                base_y = row_top + (row_height - member_height) / 2
+                draw.text((table_left + 18, row_top + row_height / 2), index_text, font=table_font, fill=text_primary, anchor="lm")
+                draw.text((member_center_x, row_top + row_height / 2), member, font=table_font, fill=member_text_color, anchor="mm")
+
+                diff_color = text_primary
+                if diff_value > 0:
+                    diff_color = positive_color
+                elif diff_value < 0:
+                    diff_color = negative_color
+
+                diff_x = value_center_x
+                diff_y = row_top + row_height / 2
+                draw.text((diff_x, diff_y), diff_text, font=table_font, fill=diff_color, anchor="mm")
+
+                draw.line([(table_left, row_bottom), (table_right, row_bottom)], fill=(230, 230, 230), width=1)
+
+            if idiom_lines:
+                idiom_y = table_top + header_height_content + rows_count * row_height + idiom_top_padding
+                for idx, (font_obj, text_line) in enumerate(idiom_lines):
+                    draw.text((padding_x, idiom_y), text_line, font=font_obj, fill=member_text_color)
+                    line_height = measure(font_obj, '字')[1]
+                    idiom_y += line_height
+                    if idx < len(idiom_lines) - 1:
+                        idiom_y += idiom_line_gap
+
+            safe_group = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]+", "_", group_name) or "group"
+            file_name = f"compare_{metric_label}_{safe_group}_{uuid4().hex[:8]}.jpg"
+            file_path = os.path.join(output_dir, file_name)
+            image.save(file_path, format='JPEG', quality=90, subsampling=0)
+            image_results.append({
+                'group': group_name,
+                'path': file_path,
+                'count': rows_count,
+            })
+
+        for group_name, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+            if group_name == '全盟':
+                continue
+            render_group_image(group_name, group_rows)
+
+        # Append an overall view covering all members at the end.
+        render_group_image('全盟', rows)
+
+        return image_results
+
+    @classmethod
+    def _build_member_df_from_records(
+        cls,
+        records: List[Dict[str, Any]],
+        metric_key: str,
+        metric_column: str,
+    ) -> pd.DataFrame:
+        if not records:
+            return pd.DataFrame(columns=['成员', metric_column, '分组'])
+
+        prepared: List[Dict[str, Any]] = []
+        for record in records:
+            member = str(record.get('member_name', '')).strip()
+            if not member:
+                continue
+            group_name = str(record.get('group_name', '')).strip() or '未分组'
+            value_raw = record.get(metric_key, 0)
+            prepared.append({'成员': member, metric_column: value_raw, '分组': group_name})
+
+        df = pd.DataFrame(prepared, columns=['成员', metric_column, '分组'])
+        if df.empty:
+            return df
+        df[metric_column] = pd.to_numeric(df[metric_column], errors='coerce').fillna(0).astype(int)
+        df['分组'] = df['分组'].astype(str).str.strip().replace({'': '未分组'})
+        df = df.sort_values(metric_column).drop_duplicates(subset=['成员'], keep='last').reset_index(drop=True)
+        return df
+
     def _analyze_member_metric_change(
         self,
         file1_path: str,
@@ -229,30 +656,17 @@ class FileAnalyzer:
             df_early = self._read_member_stats_csv(earlier_path, metric_column)
             df_late = self._read_member_stats_csv(later_path, metric_column)
 
-            early = df_early.rename(columns={metric_column: 'metric_early', '分组': '分组_早'})
-            late = df_late.rename(columns={metric_column: 'metric_late', '分组': '分组_晚'})
-
-            merged = pd.merge(early, late, on='成员', how='inner')
-            merged['分组'] = merged['分组_晚'].fillna(merged['分组_早']).fillna('未分组')
-            merged['metric_early'] = pd.to_numeric(merged['metric_early'], errors='coerce').fillna(0)
-            merged['metric_late'] = pd.to_numeric(merged['metric_late'], errors='coerce').fillna(0)
-            merged['metric_diff'] = (merged['metric_late'] - merged['metric_early']).astype(int)
-
-            metric_field = f"{metric_display_name}差值"
-            result = merged[['成员', '分组', 'metric_diff']].copy().rename(columns={'metric_diff': metric_field})
-            result = result.sort_values(by=['分组', metric_field], ascending=[True, False]).reset_index(drop=True)
-            rows: List[Dict[str, Any]] = result.to_dict(orient='records')
-            return {
-                'success': True,
-                'earlier': earlier_path,
-                'later': later_path,
-                'earlier_ts': earlier_ts.isoformat(sep=' '),
-                'later_ts': later_ts.isoformat(sep=' '),
-                'range': f"{earlier_ts} ~ {later_ts}",
-                'rows': rows,
-                'value_field': metric_field,
-                'value_label': metric_display_name,
-            }
+            payload = self._calculate_member_metric_diff(df_early, df_late, metric_column, metric_display_name)
+            payload.update(
+                {
+                    'earlier': earlier_path,
+                    'later': later_path,
+                    'earlier_ts': earlier_ts.isoformat(sep=' '),
+                    'later_ts': later_ts.isoformat(sep=' '),
+                    'range': f"{earlier_ts} ~ {later_ts}",
+                }
+            )
+            return payload
         except Exception as exc:  # noqa: BLE001
             return {'success': False, 'error': str(exc)}
 
@@ -263,6 +677,36 @@ class FileAnalyzer:
     def analyze_power_value_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
         """按势力值计算差值。"""
         return self._analyze_member_metric_change(file1_path, file2_path, '势力值', '势力值')
+
+    def analyze_contribution_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
+        """按贡献总量计算差值。"""
+        return self._analyze_member_metric_change(file1_path, file2_path, '贡献总量', '贡献总量')
+
+    def analyze_member_metric_change_from_records(
+        self,
+        earlier_records: List[Dict[str, Any]],
+        later_records: List[Dict[str, Any]],
+        metric_key: str,
+        metric_column: str,
+        metric_display_name: str,
+        earlier_ts,
+        later_ts,
+    ) -> Dict[str, Any]:
+        try:
+            df_early = self._build_member_df_from_records(earlier_records, metric_key, metric_column)
+            df_late = self._build_member_df_from_records(later_records, metric_key, metric_column)
+
+            payload = self._calculate_member_metric_diff(df_early, df_late, metric_column, metric_display_name)
+            payload.update(
+                {
+                    'earlier_ts': earlier_ts.isoformat(sep=' ') if hasattr(earlier_ts, 'isoformat') else str(earlier_ts),
+                    'later_ts': later_ts.isoformat(sep=' ') if hasattr(later_ts, 'isoformat') else str(later_ts),
+                    'range': f"{earlier_ts} ~ {later_ts}",
+                }
+            )
+            return payload
+        except Exception as exc:  # noqa: BLE001
+            return {'success': False, 'error': str(exc)}
 
     @staticmethod
     def save_grouped_tables_as_images(

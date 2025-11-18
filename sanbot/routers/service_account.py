@@ -1,14 +1,15 @@
 """Routes for handling WeChat Service Account callbacks."""
 from __future__ import annotations
 
+import logging
 import os
-from flask import Blueprint, current_app, request, render_template_string, redirect
+import re
+
+from flask import Blueprint, current_app, request, render_template_string, redirect, jsonify, send_file
 from itsdangerous import BadSignature, URLSafeSerializer
 from werkzeug.utils import secure_filename
 
 from file_analyzer import FileAnalyzer
-from sanbot.services.analysis import start_analysis_job
-from sanbot.session_store import SessionStore
 from sanbot.wechat.service_account import WeChatServiceAPI
 from sanbot.db import (
     insert_upload_with_members,
@@ -16,25 +17,27 @@ from sanbot.db import (
     ensure_user_exists,
     upload_exists,
     delete_upload_by_id,
+    get_upload_with_members,
 )
 
 
 def create_service_blueprint(
     app_config,
-    file_analyzer: FileAnalyzer,
     wechat_api: WeChatServiceAPI,
-    session_store: SessionStore,
 ):
     bp = Blueprint("wechat_service", __name__)
-    upload_folder = app_config["UPLOAD_FOLDER"]
-    high_delta_threshold = app_config.get("HIGH_DELTA_THRESHOLD", 5000)
-    supported_commands = {
-        "战功差": "分析两份CSV中的战功总量差值，按分组输出",
-        "势力值": "分析两份CSV中的势力值差值，按分组输出",
-    }
-    unsupported_text = "暂不支持指令，目前仅支持【战功差】以及【势力值】，或发送【重置】清空当前会话"
     upload_base = app_config.get("PUBLIC_BASE_URL", "").rstrip("/")
     upload_serializer = URLSafeSerializer(app_config["SECRET_KEY"], salt="sanbot-upload-link")
+    compare_image_serializer = URLSafeSerializer(app_config["SECRET_KEY"], salt="sanbot-compare-image")
+    compare_image_dir = os.path.join(app_config.get("UPLOAD_FOLDER", "/tmp"), "compare_images")
+    try:
+        os.makedirs(compare_image_dir, exist_ok=True)
+    except OSError:
+        logging.getLogger(__name__).exception("Failed to create compare_images directory")
+    welcome_template = app_config.get(
+        "SERVICE_WELCOME_MESSAGE",
+        """欢迎关注！本服务号的功能纯纯为爱发电，敬请期待更多能力，目前功能：\n功能1：<a href=\"{upload_link}\">同盟数据管理（同盟管理）</a>\n功能2：资源州找铜""",
+    )
 
     upload_template = """
     <!DOCTYPE html>
@@ -64,9 +67,17 @@ def create_service_blueprint(
                 white-space: nowrap;
                 gap: 12px;
                 padding: 8px 0;
-                border-bottom: 1px solid #dcdfe6; /* 更明显的分割线 */
+                border-bottom: 1px solid #dcdfe6;
             }
-            .upload-text { overflow: hidden; text-overflow: ellipsis; line-height: 28px; }
+            .analysis-actions { display:flex; gap:8px; margin:6px 0 0; }
+            .analysis-btn { padding:6px 16px; border-radius:6px; border:1px solid #07c160; background:#07c160; color:#fff; font-size:13px; cursor:pointer; transition:opacity 0.2s ease, transform 0.1s ease; }
+            .analysis-btn.is-disabled { background:#f1f1f1; border-color:#d9d9d9; color:#8c8c8c; cursor:not-allowed; opacity:0.7; }
+            .analysis-btn:not(.is-disabled):active { transform: translateY(1px); }
+            .upload-text { overflow: hidden; text-overflow: ellipsis; line-height: 28px; flex:1; cursor:pointer; user-select:none; display:block; outline:none; }
+            .upload-text:focus-visible .upload-text-inner { box-shadow:0 0 0 2px rgba(7,193,96,0.3); }
+            .upload-text-inner { display:inline-block; padding:2px 8px; border:1px solid transparent; border-radius:6px; transition:border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease; }
+            .upload-item.is-selected { background:rgba(7,193,96,0.05); border-radius:8px; }
+            .upload-item.is-selected .upload-text-inner { border-color:#07c160; background:rgba(7,193,96,0.12); color:#075c34; font-weight:600; }
             .delete-btn {
                 background: #fff;
                 color: #c0392b;
@@ -98,19 +109,25 @@ def create_service_blueprint(
                 <input type=\"hidden\" name=\"token\" value=\"{{ token }}\" />
                 <label>选择文件（可多选，三战导出的原始.csv）</label>
                 <input type=\"file\" name=\"files\" accept=\".csv\" multiple />
-                <button type=\"submit\">上传并保存数据</button>
-                <p class=\"note\">文件名需包含导出时间（示例：同盟统计2025年11月15日23时00分32秒.csv）。</p>
+                <p class=\"note\">文件名需包含导出时间（示例：同盟统计2025年11月15日23时00分32秒.csv）。部分安卓设备暂不支持多选，可多次选择逐个上传。</p>
             </form>
             {% endif %}
         </div>
             {% if uploads %}
             <div class="card">
                 <h2>我的数据</h2>
+                <div class="analysis-actions" role="group" aria-label="数据对比分析">
+                    <button type="button" class="analysis-btn is-disabled" data-action="battle" data-enabled="false" aria-disabled="true">战功</button>
+                    <button type="button" class="analysis-btn is-disabled" data-action="power" data-enabled="false" aria-disabled="true">势力</button>
+                    <button type="button" class="analysis-btn is-disabled" data-action="contrib" data-enabled="false" aria-disabled="true">贡献</button>
+                </div>
                 <ul class="uploads-list">
                 {% for u in uploads %}
-                    <li>
-                        <span class="upload-text">{{ u.ts }}（<a class="member-link" href="/sanbot/service/upload-detail?token={{ token }}&upload_id={{ u.id }}">成员数：{{ u.member_count }}</a>）</span>
-                        <form method="post" onsubmit="return confirm('确认删除该上传记录？此操作不可恢复。');" style="margin:0;">
+                    <li class="upload-item" data-upload-id="{{ u.id }}">
+                        <span class="upload-text" role="button" tabindex="0" aria-pressed="false">
+                            <span class="upload-text-inner">{{ u.ts }}（<a class="member-link" href="/sanbot/service/upload-detail?token={{ token }}&upload_id={{ u.id }}">成员数：{{ u.member_count }}</a>）</span>
+                        </span>
+                        <form class="delete-form" method="post" onsubmit="return confirm('确认删除该上传记录？此操作不可恢复。');" style="margin:0;">
                             <input type="hidden" name="token" value="{{ token }}" />
                             <input type="hidden" name="action" value="delete" />
                             <input type="hidden" name="upload_id" value="{{ u.id }}" />
@@ -121,6 +138,207 @@ def create_service_blueprint(
                 </ul>
             </div>
             {% endif %}
+        <script>
+            (function() {
+                const uploadForm = document.querySelector('form[method="post"][enctype="multipart/form-data"]');
+                const uploadInput = uploadForm ? uploadForm.querySelector('input[type="file"][name="files"]') : null;
+                const tokenInput = uploadForm ? uploadForm.querySelector('input[name="token"]') : null;
+                let isAutoUploading = false;
+
+                if (uploadForm && uploadInput && tokenInput) {
+                    uploadInput.addEventListener('change', async () => {
+                        if (isAutoUploading) {
+                            return;
+                        }
+                        const fileList = uploadInput.files;
+                        if (!fileList || !fileList.length) {
+                            return;
+                        }
+                        const files = Array.from(fileList);
+                        const uploadUrl = uploadForm.getAttribute('action') || window.location.href;
+                        const formData = new FormData();
+                        formData.append('token', tokenInput.value);
+                        files.forEach((file) => {
+                            formData.append('files', file, file.name);
+                        });
+                        uploadInput.value = '';
+                        uploadInput.disabled = true;
+                        isAutoUploading = true;
+                        try {
+                            const response = await fetch(uploadUrl, {
+                                method: 'POST',
+                                body: formData,
+                                credentials: 'same-origin',
+                            });
+                            if (!response.ok) {
+                                throw new Error('上传失败，请稍后重试。');
+                            }
+                            const html = await response.text();
+                            document.open();
+                            document.write(html);
+                            document.close();
+                        } catch (error) {
+                            isAutoUploading = false;
+                            uploadInput.disabled = false;
+                            window.alert(error instanceof Error ? error.message : '上传失败，请稍后重试。');
+                        }
+                    });
+                }
+
+                const actionButtons = Array.from(document.querySelectorAll('.analysis-btn'));
+                if (!actionButtons.length) {
+                    return;
+                }
+                const uploadItems = Array.from(document.querySelectorAll('.upload-item'));
+                const selectedIds = [];
+                const compareToken = {{ token|tojson }};
+                let isSubmitting = false;
+
+                const showAlert = (message) => {
+                    if (message) {
+                        window.alert(message);
+                    }
+                };
+
+                const updateButtons = () => {
+                    const enabled = selectedIds.length === 2 && !isSubmitting;
+                    actionButtons.forEach((btn) => {
+                        btn.dataset.enabled = enabled ? 'true' : 'false';
+                        btn.setAttribute('aria-disabled', (!enabled).toString());
+                        btn.classList.toggle('is-disabled', !enabled);
+                    });
+                };
+
+                const toggleSelection = (item) => {
+                    if (!item || isSubmitting) {
+                        return;
+                    }
+                    const uploadId = item.dataset.uploadId;
+                    if (!uploadId) {
+                        return;
+                    }
+                    const textEl = item.querySelector('.upload-text');
+                    const isSelected = item.classList.contains('is-selected');
+                    if (isSelected) {
+                        item.classList.remove('is-selected');
+                        if (textEl) {
+                            textEl.setAttribute('aria-pressed', 'false');
+                        }
+                        const idx = selectedIds.indexOf(uploadId);
+                        if (idx !== -1) {
+                            selectedIds.splice(idx, 1);
+                        }
+                    } else {
+                        if (selectedIds.length >= 2) {
+                            return;
+                        }
+                        item.classList.add('is-selected');
+                        if (textEl) {
+                            textEl.setAttribute('aria-pressed', 'true');
+                        }
+                        selectedIds.push(uploadId);
+                    }
+                    updateButtons();
+                };
+
+                const triggerAnalysis = (btn) => {
+                    if (!btn || isSubmitting) {
+                        return;
+                    }
+                    if (btn.dataset.enabled !== 'true') {
+                        showAlert('请选择两条上传记录进行对比');
+                        return;
+                    }
+                    if (!compareToken) {
+                        showAlert('页面凭证已失效，请刷新后重试。');
+                        return;
+                    }
+                    if (selectedIds.length !== 2) {
+                        showAlert('请选择两条上传记录进行对比');
+                        return;
+                    }
+                    const action = btn.dataset.action;
+                    if (!action) {
+                        showAlert('无法识别的分析类型');
+                        return;
+                    }
+                    isSubmitting = true;
+                    updateButtons();
+
+                    const payload = {
+                        token: compareToken,
+                        metric: action,
+                        upload_ids: selectedIds.slice(0, 2),
+                    };
+
+                    fetch('/sanbot/service/compare', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                        credentials: 'same-origin',
+                    })
+                        .then(async (resp) => {
+                            let data = {};
+                            try {
+                                data = await resp.json();
+                            } catch (err) {
+                                data = {};
+                            }
+                            if (!resp.ok || data.success === false) {
+                                const msg = data.message || data.error || '发起比对失败，请稍后重试。';
+                                throw new Error(msg);
+                            }
+                            const msg = data.message || '比对任务已提交，稍后留意公众号消息。';
+                            showAlert(msg);
+                        })
+                        .catch((error) => {
+                            showAlert(error.message || '发起比对失败，请稍后重试。');
+                        })
+                        .finally(() => {
+                            isSubmitting = false;
+                            updateButtons();
+                        });
+                };
+
+                uploadItems.forEach((item) => {
+                    const textEl = item.querySelector('.upload-text');
+                    if (!textEl) {
+                        return;
+                    }
+                    textEl.addEventListener('click', (event) => {
+                        if (event.target.closest('a')) {
+                            return;
+                        }
+                        toggleSelection(item);
+                    });
+                    textEl.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            toggleSelection(item);
+                        }
+                    });
+                });
+
+                const actionContainer = document.querySelector('.analysis-actions');
+                if (actionContainer) {
+                    actionContainer.addEventListener('click', (event) => {
+                        const btn = event.target.closest('.analysis-btn');
+                        if (!btn) {
+                            return;
+                        }
+                        if (btn.dataset.enabled !== 'true') {
+                            showAlert('请选择两条上传记录进行对比');
+                            return;
+                        }
+                        triggerAnalysis(btn);
+                    });
+                }
+
+                updateButtons();
+            })();
+        </script>
     </body>
     </html>
     """
@@ -181,91 +399,31 @@ def create_service_blueprint(
         token = upload_serializer.dumps({"user_id": openid})
         return redirect(f"/sanbot/service/upload?token={token}")
 
-    def _handle_text_message(user_id: str, content: str):
+    class _TemplateDefaults(dict):
+        def __missing__(self, key):
+            return ""
+
+    def _build_welcome_message(user_id: str) -> str:
         if not user_id:
-            return
-        command = (content or "").strip()
-        if command == "重置":
-            current_app.logger.info("ServiceAcct reset requested by %s", user_id)
-            session_store.pop(user_id)
-            wechat_api.send_text_message(user_id, "已重置会话，请重新发送指令【战功差】或【势力值】。")
-            return
-        if command not in supported_commands:
-            current_app.logger.info(
-                "ServiceAcct unsupported command from %s: %s", user_id, command
-            )
-            wechat_api.send_text_message(user_id, unsupported_text)
-            return
-        current_app.logger.info(
-            "ServiceAcct instruction recorded user=%s command=%s", user_id, command
-        )
-        session_store.pop(user_id)
-        session_store.set_instruction(user_id, command)
-        desc = supported_commands[command]
-        message = (
-            f"指令【{command}】已记录：{desc}。\n请连续上传两个CSV文件，我们会在收到第二个文件后触发分析。"
-        )
+            return welcome_template
+        upload_link = ""
         if upload_base:
             token = upload_serializer.dumps({"user_id": user_id})
             upload_link = f"{upload_base}/sanbot/service/upload?token={token}"
-            message += f"\n若无法直接在公众号上传，请点击网页上传：{upload_link}"
+        if "{" in welcome_template and "}" in welcome_template:
+            text = welcome_template.format_map(_TemplateDefaults(upload_link=upload_link))
         else:
-            message += "\n（管理员可配置 PUBLIC_BASE_URL 提供网页上传入口。）"
-        wechat_api.send_text_message(user_id, message)
+            text = welcome_template
+        if upload_link and upload_link not in text:
+            text = f"{text}\n{upload_link}"
+        return text.strip()
 
-    def _handle_file_message(user_id: str, media_id: str, raw_name: str | None, fallback_ext: str = ""):
-        session_preview = session_store.ensure(user_id)
-        instruction = (session_preview.instruction or "").strip()
-        if instruction not in supported_commands:
-            session_store.pop(user_id)
-            wechat_api.send_text_message(user_id, "请先发送指令【战功差】或【势力值】后再上传文件。")
+    def _handle_text_message(user_id: str, content: str):
+        if not user_id:
             return
-        base_name = raw_name or f"upload{fallback_ext}"
-        if fallback_ext and not base_name.lower().endswith(fallback_ext.lower()):
-            base_name = f"{base_name}{fallback_ext}"
-        safe_name = secure_filename(base_name) or f"upload{fallback_ext}"
-        file_path = os.path.join(
-            upload_folder,
-            f"{user_id}_{len(session_preview.files)}_{safe_name}",
-        )
-        current_app.logger.info(
-            "ServiceAcct file incoming user=%s media_id=%s name=%s target=%s", 
-            user_id,
-            media_id,
-            raw_name,
-            file_path,
-        )
-        success, error_msg = wechat_api.download_media(media_id, file_path)
-        if not success:
-            session_store.pop(user_id)
-            current_app.logger.warning(
-                "ServiceAcct download failed user=%s media_id=%s error=%s", 
-                user_id,
-                media_id,
-                error_msg,
-            )
-            wechat_api.send_text_message(
-                user_id,
-                f"文件下载失败（{error_msg or '未知错误'}），会话已重置，请重新发送指令和文件。",
-            )
-            return
-        current_app.logger.info(
-            "ServiceAcct download ok user=%s media_id=%s saved=%s", user_id, media_id, file_path
-        )
-        files = session_store.append_file(user_id, file_path)
-        if len(files) < 2:
-            wechat_api.send_text_message(user_id, f"已收到文件 {len(files)}/2，请继续上传第二个文件。")
-            return
-        scheduled = start_analysis_job(
-            user_id,
-            session_store,
-            file_analyzer,
-            wechat_api,
-            upload_folder,
-            high_delta_threshold,
-        )
-        if not scheduled:
-            wechat_api.send_text_message(user_id, "任务调度失败，请稍后重试。")
+        response_text = _build_welcome_message(user_id)
+        current_app.logger.info("ServiceAcct welcome message sent user=%s", user_id)
+        wechat_api.send_text_message(user_id, response_text)
 
     @bp.route("/callback", methods=["GET", "POST"])
     def service_callback():  # type: ignore[override]
@@ -295,39 +453,18 @@ def create_service_blueprint(
 
             if msg_type == "event":
                 event = message.get("Event", "")
-                if event.lower() == "subscribe":
-                    wechat_api.send_text_message(
-                        from_user,
-                        "欢迎关注！本服务号的功能纯纯为爱发电，敬请期待更多能力。",
-                    )
+                if event.lower() == "subscribe" and from_user:
+                    welcome_text = _build_welcome_message(from_user)
+                    wechat_api.send_text_message(from_user, welcome_text)
+                elif event.lower() == "click" and from_user:
+                    event_key = (message.get("EventKey") or "").strip()
+                    if event_key == "SET_SEASON_PLACEHOLDER":
+                        wechat_api.send_text_message(from_user, "这个功能还没做，现在就是记录一下谁是铜奴。")
             elif msg_type == "text":
                 _handle_text_message(from_user, message.get("Content", ""))
-            elif msg_type in {"file", "image"}:
-                media_id = (
-                    message.get("MediaId")
-                    or message.get("MediaID")
-                    or message.get("FileKey")
-                    or ""
-                )
-                file_name = (
-                    message.get("FileName")
-                    or message.get("Title")
-                    or ("image.jpg" if msg_type == "image" else "upload.dat")
-                )
-                _, extension = os.path.splitext(file_name)
-                if not extension:
-                    extension = ".jpg" if msg_type == "image" else ".csv"
-                if not media_id:
-                    current_app.logger.warning(
-                        "Missing media id for %s message: payload=%s", msg_type, message
-                    )
-                    if from_user:
-                        wechat_api.send_text_message(from_user, "文件接收失败，请重试。")
-                else:
-                    _handle_file_message(from_user, media_id, file_name, extension)
             else:
                 if from_user:
-                    wechat_api.send_text_message(from_user, "目前仅支持发送指令与CSV文件上传，敬请期待更多能力。")
+                    _handle_text_message(from_user, "")
         except Exception:  # noqa: BLE001
             current_app.logger.exception("Service callback processing failed")
 
@@ -437,7 +574,6 @@ def create_service_blueprint(
                 uploads=upload_history,
             )
 
-        from file_analyzer import FileAnalyzer  # filename ts parser
         import pandas as pd
         successes = 0
         skipped = 0
@@ -468,7 +604,7 @@ def create_service_blueprint(
             from file_analyzer import FileAnalyzer as FA
             raw_columns = list(map(str, df.columns))
             member_col = FA._find_column(raw_columns, "成员")
-            rank_col = FA._find_column(raw_columns, "贡献排名")
+            rank_col = FA._find_column(raw_columns, "贡献排行")
             contrib_col = FA._find_column(raw_columns, "贡献总量")
             battle_col = FA._find_column(raw_columns, "战功总量")
             assist_col = FA._find_column(raw_columns, "助攻总量")
@@ -492,10 +628,14 @@ def create_service_blueprint(
                 failures.append(f"{filename}: 缺少必要列 {','.join(missing)}")
                 continue
 
-            df = df[[member_col, rank_col, contrib_col, battle_col, assist_col, donate_col, power_col, group_col]].copy() if rank_col else df[[member_col, contrib_col, battle_col, assist_col, donate_col, power_col, group_col]].copy()  # noqa: E501
+            df = (
+                df[[member_col, rank_col, contrib_col, battle_col, assist_col, donate_col, power_col, group_col]].copy()
+                if rank_col
+                else df[[member_col, contrib_col, battle_col, assist_col, donate_col, power_col, group_col]].copy()
+            )
             cols = ["成员", "贡献总量", "战功总量", "助攻总量", "捐献总量", "势力值", "分组"]
             if rank_col:
-                df.columns = ["成员", "贡献排名"] + cols[1:]
+                df.columns = ["成员", "贡献排行"] + cols[1:]
             else:
                 df.columns = cols
 
@@ -514,11 +654,26 @@ def create_service_blueprint(
                     failures.append(f"{filename}: 存在空分组")
                 else:
                     members_payload = []
+                    rank_column_present = "贡献排行" in df.columns
                     for _, row in df.iterrows():
+                        rank_value = None
+                        if rank_column_present:
+                            raw_rank = row.get("贡献排行", None)
+                            if not pd.isna(raw_rank):
+                                if isinstance(raw_rank, str):
+                                    raw_rank_str = raw_rank.strip()
+                                else:
+                                    raw_rank_str = str(raw_rank)
+                                match = re.search(r"\d+", raw_rank_str)
+                                if match:
+                                    try:
+                                        rank_value = int(match.group())
+                                    except ValueError:
+                                        rank_value = None
                         members_payload.append(
                             {
                                 "member_name": str(row["成员"]),
-                                "rank": int(row["贡献排名"]) if ("贡献排名" in df.columns) and (not pd.isna(row.get("贡献排名", None))) else None,
+                                "rank": rank_value,
                                 "contrib_total": int(row["贡献总量"]),
                                 "battle_total": int(row["战功总量"]),
                                 "assist_total": int(row["助攻总量"]),
@@ -554,5 +709,203 @@ def create_service_blueprint(
             token=token,
             uploads=upload_history,
         )
+
+    @bp.route("/compare", methods=["POST"])
+    def compare_uploads():
+        data = request.get_json(silent=True) or {}
+        token = data.get("token", "")
+        if not token:
+            return jsonify({"success": False, "message": "缺少 token 参数。"}), 400
+        try:
+            payload = upload_serializer.loads(token, max_age=1800)
+        except BadSignature:
+            return jsonify({"success": False, "message": "链接已失效，请刷新页面后重试。"}), 400
+
+        user_id = payload.get("user_id")
+        if not user_id:
+            return jsonify({"success": False, "message": "无法识别用户身份。"}), 400
+
+        upload_ids_raw = data.get("upload_ids")
+        if not isinstance(upload_ids_raw, (list, tuple)) or len(upload_ids_raw) != 2:
+            return jsonify({"success": False, "message": "请选择两条上传记录进行对比。"}), 400
+        try:
+            upload_ids = [int(x) for x in upload_ids_raw]
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "上传记录参数格式不正确。"}), 400
+        if upload_ids[0] == upload_ids[1]:
+            return jsonify({"success": False, "message": "请选择两条不同的上传记录。"}), 400
+
+        metric_key = (data.get("metric") or "").lower()
+        metric_map = {
+            "battle": {"metric_key": "battle_total", "column": "战功总量", "label": "战功总量"},
+            "power": {"metric_key": "power_value", "column": "势力值", "label": "势力值"},
+            "contrib": {"metric_key": "contrib_total", "column": "贡献总量", "label": "贡献总量"},
+        }
+        metric_info = metric_map.get(metric_key)
+        if not metric_info:
+            return jsonify({"success": False, "message": "无法识别的分析类型。"}), 400
+
+        upload_a, members_a = get_upload_with_members(current_app.config, user_id, upload_ids[0])
+        upload_b, members_b = get_upload_with_members(current_app.config, user_id, upload_ids[1])
+        if not upload_a or not upload_b:
+            return jsonify({"success": False, "message": "上传记录不存在或已删除。"}), 404
+
+        ts_a = upload_a.get("ts")
+        ts_b = upload_b.get("ts")
+        earlier_meta = upload_a
+        later_meta = upload_b
+        earlier_members = members_a
+        later_members = members_b
+        if ts_a and ts_b and ts_a > ts_b:
+            earlier_meta, later_meta = upload_b, upload_a
+            earlier_members, later_members = members_b, members_a
+
+        analyzer = FileAnalyzer()
+        try:
+            comparison = analyzer.analyze_member_metric_change_from_records(
+                earlier_members,
+                later_members,
+                metric_info["metric_key"],
+                metric_info["column"],
+                metric_info["label"],
+                earlier_meta.get("ts"),
+                later_meta.get("ts"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.exception("Compare analysis failed user=%s metric=%s", user_id, metric_key)
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比失败：{exc}")
+            return jsonify({"success": False, "message": "分析失败，请稍后重试。"}), 500
+
+        if not comparison.get("success"):
+            message = comparison.get("error") or "分析失败，请稍后重试。"
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比失败：{message}")
+            return jsonify({"success": False, "message": message}), 500
+
+        rows = comparison.get("rows", [])
+        value_field = comparison.get("value_field") or f"{metric_info['label']}差值"
+        earlier_ts_value = comparison.get("earlier_ts") or earlier_meta.get("ts")
+        later_ts_value = comparison.get("later_ts") or later_meta.get("ts")
+        earlier_ts_display = FileAnalyzer._format_ts_shichen(earlier_ts_value) or str(earlier_ts_value or "")
+        later_ts_display = FileAnalyzer._format_ts_shichen(later_ts_value) or str(later_ts_value or "")
+
+        if not rows:
+            summary = (
+                f"{metric_info['label']}对比结果\n"
+                f"{earlier_ts_display} → {later_ts_display}\n"
+                "两次上传没有共同成员，暂无可比数据。"
+            )
+            wechat_api.send_text_message(user_id, summary.strip())
+            return jsonify({"success": True, "message": "对比完成：暂无共同成员，已通过公众号通知。"})
+
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        header_path = os.path.join(root_dir, "resources", "header.jpg")
+
+        try:
+            image_results = analyzer.save_compare_group_images(
+                rows,
+                value_field=value_field,
+                metric_label=value_field,
+                earlier_ts=earlier_ts_value,
+                later_ts=later_ts_value,
+                output_dir=compare_image_dir,
+                header_path=header_path,
+            )
+        except FileNotFoundError as exc:
+            current_app.logger.exception("Compare image header missing user=%s", user_id)
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比失败：缺少头图资源，请联系管理员。")
+            return jsonify({"success": False, "message": str(exc)}), 500
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.exception("Compare image render failed user=%s", user_id)
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比失败：生成图表时出现异常。")
+            return jsonify({"success": False, "message": "生成图表失败，请稍后重试。"}), 500
+
+        if not image_results:
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比完成，但暂未生成图像结果。")
+            return jsonify({"success": True, "message": "对比完成，暂无图像输出。"})
+
+        base_url = upload_base or request.url_root.rstrip("/")
+        if not base_url:
+            base_url = request.url_root.rstrip("/")
+
+        link_lines = [
+            f"{metric_info['label']}对比完成",
+            f"{earlier_ts_display} → {later_ts_display}",
+            "生成图片的有效期为30分钟，请及时下载",
+        ]
+
+        download_records: list[tuple[str, int, str]] = []
+        for item in image_results:
+            image_path = item.get("path") or ""
+            if not image_path or not os.path.isfile(image_path):
+                current_app.logger.error("Compare image missing on disk user=%s path=%s", user_id, image_path)
+                continue
+            filename = os.path.basename(image_path)
+            group_label = item.get("group") or "未分组"
+            count = int(item.get("count", 0))
+            slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]+", "", group_label)
+            if not slug:
+                slug = "未分组"
+            friendly_name = f"{metric_info['label']}对比_{slug}_{count}人.jpg"
+            if len(friendly_name) > 60:
+                friendly_name = f"{metric_info['label']}对比_{slug[:12]}_{count}人.jpg"
+            token = compare_image_serializer.dumps({
+                "user_id": user_id,
+                "file": filename,
+                "name": friendly_name,
+            })
+            download_link = f"{base_url}/sanbot/service/compare-image?token={token}"
+            download_records.append((group_label, count, download_link))
+
+        if not download_records:
+            wechat_api.send_text_message(user_id, f"{metric_info['label']}对比完成，但未生成有效下载链接。")
+            return jsonify({"success": False, "message": "未生成下载链接，请稍后重试。"}), 500
+
+        for idx, (group_label, count, link) in enumerate(download_records, start=1):
+            line = f"{idx}. <a href=\"{link}\">{group_label}（{count}人）</a>"
+            link_lines.append(line)
+
+        message_text = "\n".join(link_lines)
+        send_resp = wechat_api.send_text_message(user_id, message_text)
+        errcode = send_resp.get("errcode")
+        if errcode not in (None, 0):
+            errmsg = send_resp.get("errmsg") or "消息发送失败"
+            current_app.logger.error(
+                "Compare link message failed user=%s err=%s resp=%s",
+                user_id,
+                errmsg,
+                send_resp,
+            )
+            return jsonify({"success": False, "message": errmsg}), 502
+
+        return jsonify({"success": True, "message": "对比结果已生成，请在公众号查看下载链接。"})
+
+    @bp.route("/compare-image", methods=["GET"])
+    def download_compare_image():
+        token = request.args.get("token", "")
+        if not token:
+            return ("缺少 token 参数。", 400)
+        try:
+            payload = compare_image_serializer.loads(token, max_age=1800)
+        except BadSignature:
+            return ("下载链接已失效，请重新发起对比。", 400)
+
+        file_id = payload.get("file")
+        if not file_id:
+            return ("链接无效，缺少文件信息。", 400)
+
+        file_path = os.path.join(compare_image_dir, file_id)
+        if not os.path.isfile(file_path):
+            return ("文件不存在或已删除，请重新发起对比。", 404)
+
+        download_name = payload.get("name") or file_id
+        try:
+            return send_file(
+                file_path,
+                mimetype="image/jpeg",
+                as_attachment=True,
+                download_name=download_name,
+            )
+        except FileNotFoundError:
+            return ("文件不存在或已删除，请重新发起对比。", 404)
 
     return bp

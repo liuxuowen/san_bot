@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import time
 from typing import Any, Dict, Optional
@@ -116,6 +117,28 @@ class WeChatServiceAPI:
             "touser": user_id,
             "msgtype": "image",
             "image": {"media_id": media_id},
+        }
+        return self._post_json(url, payload)
+
+    def upload_file(self, file_path: str, filename: str | None = None, mime_type: str = "application/octet-stream") -> Dict[str, Any]:
+        token = self.get_access_token()
+        url = f"{self.base_url}/media/upload?access_token={token}&type=file"
+        try:
+            with open(file_path, "rb") as handle:
+                media_name = filename or os.path.basename(file_path)
+                files = {"media": (media_name, handle, mime_type)}
+                response = requests.post(url, files=files, timeout=30)
+                return response.json()
+        except Exception as exc:  # noqa: BLE001
+            return {"errcode": -1, "errmsg": str(exc)}
+
+    def send_file_message(self, user_id: str, media_id: str) -> Dict[str, Any]:
+        token = self.get_access_token()
+        url = f"{self.base_url}/message/custom/send?access_token={token}"
+        payload = {
+            "touser": user_id,
+            "msgtype": "file",
+            "file": {"media_id": media_id},
         }
         return self._post_json(url, payload)
 
