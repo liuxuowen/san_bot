@@ -3,7 +3,7 @@
 # San Bot Startup Script
 
 echo "=================================="
-echo "San Bot - WeChat Work File Analysis Bot"
+echo "San Bot - 微信服务号 / 企业微信 文件分析助手"
 echo "=================================="
 echo ""
 
@@ -17,6 +17,11 @@ fi
 echo "Activating virtual environment..."
 source venv/bin/activate
 
+# Stop existing instances
+echo "Stopping existing San Bot processes (if any)..."
+PROJECT_ROOT=$(cd "$(dirname "$0")" && pwd)
+pkill -f "${PROJECT_ROOT}/app.py" 2>/dev/null || true
+
 # Install dependencies
 echo "Installing dependencies..."
 pip install -q -r requirements.txt
@@ -29,18 +34,22 @@ if [ ! -f ".env" ]; then
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         cp .env.example .env
-        echo ".env file created. Please edit it with your WeChat Work credentials."
+        echo ".env file created. Please edit it with your Service Account / WeCom credentials."
         exit 0
     else
         echo "Continuing without .env file (using defaults)..."
     fi
 fi
 
-# Start the application
+# Start the application in background with log redirection
 echo ""
-echo "Starting San Bot..."
-echo "Server will be available at http://0.0.0.0:5000"
-echo "Press Ctrl+C to stop"
+echo "Starting San Bot in background..."
+echo "Server will be available at http://0.0.0.0:7000 (override via .env)"
+echo "Logs: /opt/projects/logs/sanbot.log"
 echo ""
 
-python app.py
+LOG_DIR=/opt/projects/logs
+mkdir -p "$LOG_DIR"
+
+nohup python app.py >> "$LOG_DIR/sanbot.log" 2>&1 &
+echo "San Bot started with PID $!"

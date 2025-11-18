@@ -1,141 +1,78 @@
-# 快速开始指南
+# 快速开始（服务号 + 企业微信）
 
-## 第一步：安装依赖
+## 1. 安装依赖
 
 ```bash
-# 安装 Python 依赖
 pip install -r requirements.txt
 ```
 
-## 第二步：配置环境变量
+## 2. 配置环境变量
 
 ```bash
-# 复制环境变量模板
 cp .env.example .env
-
-# 编辑 .env 文件，填入你的企业微信配置
-vim .env
 ```
 
-需要配置的参数：
-- `WECHAT_CORP_ID`: 企业ID（在企业微信管理后台"我的企业"页面获取）
-- `WECHAT_CORP_SECRET`: 应用Secret（在应用详情页获取）
-- `WECHAT_AGENT_ID`: 应用AgentId（在应用详情页获取）
-- `WECHAT_TOKEN`: Token（在应用接收消息配置页面设置）
-- `WECHAT_ENCODING_AES_KEY`: EncodingAESKey（在应用接收消息配置页面设置）
+需要重点填写：
 
-## 第三步：运行应用
+- `FUWUHAO_APP_ID` / `FUWUHAO_APP_SECRET` / `FUWUHAO_TOKEN`（服务号）
+- `WECHAT_*`（如需企业微信兼容）
+- `PORT`、`HOST`、`HIGH_DELTA_THRESHOLD` 等通用项
 
-### 方式1：使用启动脚本（推荐）
+## 3. 运行应用
+
+### 启动脚本（推荐）
 
 ```bash
 ./start.sh
 ```
 
-### 方式2：直接运行
+### 手动方式
 
 ```bash
-python app.py
+FLASK_ENV=development python app.py
 ```
 
-### 方式3：使用 Docker
+服务默认监听 `http://0.0.0.0:7000`。
+
+## 4. 接入微信服务号
+
+1. 登录 [mp.weixin.qq.com](https://mp.weixin.qq.com/)
+2. 在「开发」→「基本配置」中启用服务器配置
+3. 设置回调 URL：`https://<域名>/sanbot/service/callback`
+4. Token 与 `.env` 中 `FUWUHAO_TOKEN` 保持一致
+5. 消息加解密方式选择 **明文模式**
+6. 提交后即可通过手机微信与服务号交互
+
+## 5. （可选）接入企业微信
+
+1. 在企业微信管理后台创建自建应用
+2. 在“接收消息”中设置 URL：`https://<域名>/wechat/work/callback`
+3. 将企业 ID、Secret、AgentId、Token、EncodingAESKey 填入 `.env`
+
+## 6. 验证功能
+
+### API 调用
 
 ```bash
-# 构建并启动
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f
-
-# 停止服务
-docker-compose down
+curl -X POST http://localhost:7000/api/analyze \
+  -F "file1=@tests/a.csv" \
+  -F "file2=@tests/b.csv" \
+  -F "instruction=对比两个报表"
 ```
 
-## 第四步：测试功能
-
-### 测试 API
-
-```bash
-# 准备两个测试文件
-echo "Hello World" > file1.txt
-echo "Hello Python" > file2.txt
-
-# 调用分析接口
-curl -X POST http://localhost:5000/api/analyze \
-  -F "file1=@file1.txt" \
-  -F "file2=@file2.txt" \
-  -F "instruction=对比这两个文件"
-```
-
-### 运行演示程序
+### 本地演示
 
 ```bash
 python test_demo.py
 ```
 
-## 第五步：配置企业微信
+## 7. 常见问题
 
-1. 登录[企业微信管理后台](https://work.weixin.qq.com/)
-2. 进入"应用管理" → "应用" → "创建应用"
-3. 在应用详情页，配置"接收消息"：
-   - URL: `http://你的域名/wechat/callback`
-   - Token: 填入 .env 文件中的 WECHAT_TOKEN
-   - EncodingAESKey: 填入 .env 文件中的 WECHAT_ENCODING_AES_KEY
-4. 保存配置
+| 问题 | 解决思路 |
+| --- | --- |
+| 服务号校验失败 | 确认 Token、明文模式以及公网可达性 |
+| 上传后无响应 | 查看日志，确认分析线程是否抛错；必要时提高超时或减小文件大小 |
+| 图片发送失败 | 检查 `resources/header2.jpg` 是否存在，以及服务号是否具备素材上传权限 |
 
-## 使用机器人
+完成上述步骤后，普通微信用户即可通过服务号发送指令与文件，实现和原企微机器人的同样体验。
 
-1. 在企业微信中打开你创建的应用
-2. 发送文本消息，描述分析需求（例如："对比两个配置文件"）
-3. 上传第一个文件
-4. 上传第二个文件
-5. 等待机器人返回分析报告
-
-## 常见问题
-
-### Q: 如何查看日志？
-A: 应用日志会输出到控制台，可以重定向到文件：
-```bash
-python app.py > app.log 2>&1
-```
-
-### Q: 如何修改端口？
-A: 在 .env 文件中设置 `PORT=你的端口号`
-
-### Q: 支持哪些文件格式？
-A: txt, csv, json, xlsx, xls, pdf, doc, docx
-
-### Q: 文件大小限制是多少？
-A: 默认 16MB，可在 config.py 中修改 `MAX_CONTENT_LENGTH`
-
-### Q: 如何部署到生产环境？
-A: 推荐使用 Docker 或 Gunicorn：
-```bash
-# 使用 Gunicorn
-pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
-
-# 或使用 Docker
-docker-compose up -d
-```
-
-## 获取帮助
-
-- 查看 README.md 了解详细文档
-- 运行 `python test_demo.py` 查看功能演示
-- 提交 Issue 报告问题
-
-## 升级维护
-
-```bash
-# 更新代码
-git pull origin main
-
-# 更新依赖
-pip install -r requirements.txt --upgrade
-
-# 重启服务
-docker-compose restart  # 如果使用 Docker
-# 或
-./start.sh  # 如果使用启动脚本
-```

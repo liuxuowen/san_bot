@@ -9,17 +9,10 @@ SSH_PORT="22"
 
 # Optional: SSH private key (PEM) for authentication
 # Example: KEY_PATH="$HOME/.ssh/id_rsa" or id_ed25519
-KEY_PATH=""
+KEY_PATH="/Users/liuxu/peiqi.pem"
 
 # Remote deployment directory (absolute path recommended)
 REMOTE_DIR="/opt/projects/san_bot"
-
-# Optional: systemd service name (uncomment to use)
-# SERVICE_NAME="san-bot"
-
-# Optional: custom start command when not using systemd
-# It should daemonize (nohup/screen/tmux). We'll default to nohup start.sh
-START_CMD="nohup bash -lc './start.sh' > san_bot.out 2>&1 &"
 
 # Exclusions for rsync (local paths)
 EXCLUDES=(
@@ -45,9 +38,9 @@ rsync_upload() {
     SSH_E+=" -i ${KEY_PATH}"
   fi
   local -a args=(
-    -az
+    -azh --itemize-changes
     --delete
-    --chmod=Dug=rwx,Do=rx,Fug=rw,Fo=r
+    --chmod=Dug=rwx,Do=rx,Fug=rwX,Fo=rX
     -e "$SSH_E"
   )
   for ex in "${EXCLUDES[@]}"; do args+=(--exclude "$ex"); done
@@ -65,13 +58,29 @@ ssh_remote() {
 
 # ============ Deploy Steps ============
 main() {
-  echo "[1/5] Ensure remote directory exists"
+  echo "[1/4] Ensure remote directory exists"
   ssh_remote "mkdir -p '${REMOTE_DIR}'"
 
-  echo "[2/5] Syncing source via rsync"
-  rsync_upload "."  # current repo root
+  echo "[2/4] Syncing source via rsync"
+  local RSYNC_LOG=""
+  RSYNC_LOG=$(mktemp)
+  trap 'rm -f "${RSYNC_LOG:-}"' EXIT
+  echo "- Logging rsync changes to ${RSYNC_LOG}"
+  if rsync_upload "." | tee "${RSYNC_LOG}"; then
+    local SUMMARY
+    SUMMARY=$(grep -E '^[<>ch*]' "${RSYNC_LOG}" || true)
+    if [ -n "$SUMMARY" ]; then
+      echo "- Files synchronized:"
+      printf '%s\n' "$SUMMARY"
+    else
+      echo "- Files synchronized: (no changes)"
+    fi
+  else
+    echo "Rsync failed; see ${RSYNC_LOG:-<no-log>}" >&2
+    exit 1
+  fi
 
-  echo "[3/5] Prepare Python env + install deps"
+  echo "[3/4] Prepare Python env + install deps"
   ssh_remote "set -e; cd '${REMOTE_DIR}'; \
     if [ ! -d 'venv' ]; then python3 -m venv venv; fi; \
     . venv/bin/activate; \
@@ -79,19 +88,7 @@ main() {
     pip install -r requirements.txt; \
     mkdir -p uploads output"
 
-  echo "[4/5] Restarting service or app"
-  if [ -n "${SERVICE_NAME:-}" ]; then
-    ssh_remote "sudo systemctl daemon-reload || true; sudo systemctl restart '${SERVICE_NAME}'"
-    echo "- Restarted systemd service: ${SERVICE_NAME}"
-  else
-    # Try to stop existing app (best-effort)
-    ssh_remote "pkill -f 'python app.py' || true; pkill -f 'gunicorn .*app:app' || true"
-    # Start with nohup using start.sh (creates venv 'venv' and runs python app.py)
-    ssh_remote "cd '${REMOTE_DIR}'; ${START_CMD}"
-    echo "- Started app with nohup using start.sh"
-  fi
-
-  echo "[5/5] Done. Remote path: ${REMOTE_DIR}"
+  echo "[4/4] Code sync complete. Please log onto ${REMOTE_HOST} and start the service manually."
 }
 
 main "$@"

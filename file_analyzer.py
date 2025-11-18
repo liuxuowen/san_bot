@@ -158,42 +158,67 @@ class FileAnalyzer:
     def _parse_cn_timestamp_from_filename(filename: str) -> datetime:
         """Parse Chinese datetime from filename like 同盟统计YYYY年MM月DD日HH时MM分SS秒.csv"""
         base = os.path.basename(filename)
-        m = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日(\d{1,2})时(\d{1,2})分(\d{1,2})秒", base)
-        if not m:
-            raise ValueError(f"无法从文件名解析时间戳: {filename}")
-        y, mo, d, h, mi, s = map(int, m.groups())
-        return datetime(y, mo, d, h, mi, s)
+        name, _ = os.path.splitext(base)
+        name = re.sub(r"\(\d+\)$", "", name)
+        m = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日(\d{1,2})时(\d{1,2})分(\d{1,2})秒", name)
+        if m:
+            y, mo, d, h, mi, s = map(int, m.groups())
+            return datetime(y, mo, d, h, mi, s)
+
+        digits = re.search(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", name)
+        if digits:
+            y, mo, d, h, mi, s = map(int, digits.groups())
+            return datetime(y, mo, d, h, mi, s)
+
+        raise ValueError(f"无法从文件名解析时间戳: {filename}")
 
     @staticmethod
-    def _read_member_stats_csv(path: str) -> pd.DataFrame:
-        """Read CSV and return DataFrame with columns: 成员, 战功总量, 分组"""
-        df = pd.read_csv(path, encoding='utf-8', skipinitialspace=True)
-        df.columns = df.columns.str.strip()
-        # Keep only needed columns, handle if some are missing
-        needed = ['成员', '战功总量', '分组']
-        for col in needed:
-            if col not in df.columns:
-                raise ValueError(f"CSV缺少必要列: {col} ({path})")
-        df = df[needed].copy()
-        # Normalize types
+    def _normalize_header(name: str) -> str:
+        return re.sub(r"\s+", "", str(name).replace('\ufeff', '').strip())
+
+    @classmethod
+    def _find_column(cls, columns: List[str], target: str) -> str | None:
+        normalized_target = cls._normalize_header(target)
+        for column in columns:
+            if cls._normalize_header(column) == normalized_target:
+                return column
+        return None
+
+    @classmethod
+    def _read_member_stats_csv(cls, path: str, metric_column: str) -> pd.DataFrame:
+        """Read CSV and return DataFrame with columns: 成员, 指标列, 分组"""
+        df = pd.read_csv(path, encoding='utf-8-sig', skipinitialspace=True)
+        raw_columns = list(map(str, df.columns))
+        member_col = cls._find_column(raw_columns, '成员')
+        metric_col = cls._find_column(raw_columns, metric_column)
+        group_col = cls._find_column(raw_columns, '分组')
+        if not member_col or not metric_col or not group_col:
+            missing = []
+            if not member_col:
+                missing.append('成员')
+            if not metric_col:
+                missing.append(metric_column)
+            if not group_col:
+                missing.append('分组')
+            raise ValueError(f"CSV缺少必要列: {','.join(missing)} ({path})。实际列: {', '.join(raw_columns)}")
+        df = df[[member_col, metric_col, group_col]].copy()
+        df.columns = ['成员', metric_column, '分组']
         df['成员'] = df['成员'].astype(str).str.strip()
         df['分组'] = df['分组'].astype(str).str.strip().replace({'': '未分组'})
-        df['战功总量'] = pd.to_numeric(df['战功总量'], errors='coerce').fillna(0).astype(int)
-        # Drop duplicate members by keeping the max 战功总量 (defensive)
-        df = df.sort_values('战功总量').drop_duplicates(subset=['成员'], keep='last').reset_index(drop=True)
+        df[metric_column] = pd.to_numeric(df[metric_column], errors='coerce').fillna(0).astype(int)
+        df = df.sort_values(metric_column).drop_duplicates(subset=['成员'], keep='last').reset_index(drop=True)
         return df
 
-    def analyze_battle_merit_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
-        """
-        比对两个同盟统计CSV，按文件名中的时间戳识别先后，
-        统计在此时间段内每位成员的 战功总量 差值，并按 分组、差值 排序输出。
-
-        Returns dict with keys: success, earlier, later, range, rows (list of dicts)
-        """
+    def _analyze_member_metric_change(
+        self,
+        file1_path: str,
+        file2_path: str,
+        metric_column: str,
+        metric_display_name: str,
+    ) -> Dict[str, Any]:
         try:
             t1 = self._parse_cn_timestamp_from_filename(file1_path)
             t2 = self._parse_cn_timestamp_from_filename(file2_path)
-            # Determine earlier and later
             if t1 <= t2:
                 earlier_path, later_path = file1_path, file2_path
                 earlier_ts, later_ts = t1, t2
@@ -201,26 +226,21 @@ class FileAnalyzer:
                 earlier_path, later_path = file2_path, file1_path
                 earlier_ts, later_ts = t2, t1
 
-            df_early = self._read_member_stats_csv(earlier_path)
-            df_late = self._read_member_stats_csv(later_path)
+            df_early = self._read_member_stats_csv(earlier_path, metric_column)
+            df_late = self._read_member_stats_csv(later_path, metric_column)
 
-            early = df_early.rename(columns={'战功总量': '战功总量_早', '分组': '分组_早'})
-            late = df_late.rename(columns={'战功总量': '战功总量_晚', '分组': '分组_晚'})
+            early = df_early.rename(columns={metric_column: 'metric_early', '分组': '分组_早'})
+            late = df_late.rename(columns={metric_column: 'metric_late', '分组': '分组_晚'})
 
-            # Inner join: only keep members that exist in both files
             merged = pd.merge(early, late, on='成员', how='inner')
-            # Determine group preference: later > earlier > 未分组
             merged['分组'] = merged['分组_晚'].fillna(merged['分组_早']).fillna('未分组')
-            merged['战功总量_早'] = pd.to_numeric(merged['战功总量_早'], errors='coerce').fillna(0)
-            merged['战功总量_晚'] = pd.to_numeric(merged['战功总量_晚'], errors='coerce').fillna(0)
-            merged['战功总量差值'] = (merged['战功总量_晚'] - merged['战功总量_早']).astype(int)
+            merged['metric_early'] = pd.to_numeric(merged['metric_early'], errors='coerce').fillna(0)
+            merged['metric_late'] = pd.to_numeric(merged['metric_late'], errors='coerce').fillna(0)
+            merged['metric_diff'] = (merged['metric_late'] - merged['metric_early']).astype(int)
 
-            # Build output
-            result = merged[['成员', '分组', '战功总量差值']].copy()
-            # Sort by group (asc) then diff (desc)
-            result = result.sort_values(by=['分组', '战功总量差值'], ascending=[True, False]).reset_index(drop=True)
-
-            # Pack rows for return
+            metric_field = f"{metric_display_name}差值"
+            result = merged[['成员', '分组', 'metric_diff']].copy().rename(columns={'metric_diff': metric_field})
+            result = result.sort_values(by=['分组', metric_field], ascending=[True, False]).reset_index(drop=True)
             rows: List[Dict[str, Any]] = result.to_dict(orient='records')
             return {
                 'success': True,
@@ -229,10 +249,20 @@ class FileAnalyzer:
                 'earlier_ts': earlier_ts.isoformat(sep=' '),
                 'later_ts': later_ts.isoformat(sep=' '),
                 'range': f"{earlier_ts} ~ {later_ts}",
-                'rows': rows
+                'rows': rows,
+                'value_field': metric_field,
+                'value_label': metric_display_name,
             }
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
+        except Exception as exc:  # noqa: BLE001
+            return {'success': False, 'error': str(exc)}
+
+    def analyze_battle_merit_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
+        """按战功总量计算差值。"""
+        return self._analyze_member_metric_change(file1_path, file2_path, '战功总量', '战功总量')
+
+    def analyze_power_value_change(self, file1_path: str, file2_path: str) -> Dict[str, Any]:
+        """按势力值计算差值。"""
+        return self._analyze_member_metric_change(file1_path, file2_path, '势力值', '势力值')
 
     @staticmethod
     def save_grouped_tables_as_images(
@@ -240,6 +270,8 @@ class FileAnalyzer:
         out_dir: str,
         title_prefix: str,
         display_title: str,
+        value_field: str,
+        value_label: str,
         high_delta_threshold: int = 5000,
     ) -> List[str]:
         import random
@@ -249,7 +281,7 @@ class FileAnalyzer:
         os.makedirs(out_dir, exist_ok=True)
         import pandas as pd
         df = pd.DataFrame(result_rows)
-        if df.empty:
+        if df.empty or value_field not in df.columns:
             return []
 
         header_path = os.path.join(os.path.dirname(__file__), 'resources', 'header2.jpg')
@@ -303,12 +335,12 @@ class FileAnalyzer:
             return lines
 
         groups_to_render: List[Tuple[str, pd.DataFrame]] = []
-        all_view = df[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+        all_view = df[['成员', value_field]].sort_values(value_field, ascending=False).reset_index(drop=True)
         groups_to_render.append(('全盟', all_view))
         for group, subdf in df.groupby('分组', sort=True):
             if str(group) == '未分组':
                 continue
-            group_view = subdf[['成员', '战功总量差值']].sort_values('战功总量差值', ascending=False).reset_index(drop=True)
+            group_view = subdf[['成员', value_field]].sort_values(value_field, ascending=False).reset_index(drop=True)
             groups_to_render.append((str(group), group_view))
 
         idioms_path = os.path.join(os.path.dirname(__file__), 'resources', 'idioms100.json')
@@ -387,7 +419,7 @@ class FileAnalyzer:
             header_y = table_start_y
             header_center_y = header_y + row_height_base / 2
             col_centers = [table_left + cell_width / 2, table_left + 1.5 * cell_width]
-            col_titles = ["成员", "战功总量差值"]
+            col_titles = ["成员", f"{value_label}差值"]
 
             for idx, title in enumerate(col_titles):
                 draw.text((col_centers[idx], header_center_y), title, font=table_font, fill=(40, 40, 40, 255), anchor="mm")
@@ -398,7 +430,7 @@ class FileAnalyzer:
                 y1 = int(round(header_y + row_height_base))
                 draw.rectangle([x0, y0, x1, y1], outline=(80, 80, 80, 255), width=2)
 
-            for row_idx, (member, delta) in enumerate(view[['成员', '战功总量差值']].itertuples(index=False, name=None)):
+            for row_idx, (member, delta) in enumerate(view[['成员', value_field]].itertuples(index=False, name=None)):
                 row_top = table_start_y + (row_idx + 1) * row_height_base
                 y_top = int(round(row_top))
                 y_bottom = int(round(row_top + row_height_base))
@@ -431,13 +463,13 @@ class FileAnalyzer:
             saved_paths.append(out_path)
 
             if group != '全盟' and not view.empty:
-                avg_delta = float(view['战功总量差值'].mean())
-                zero_count = int((view['战功总量差值'] == 0).sum())
+                avg_delta = float(view[value_field].mean())
+                zero_count = int((view[value_field] == 0).sum())
                 group_stats.append({
                     '分组名称': group,
                     '有效成员人数': len(view),
-                    '平均战功差值': round(avg_delta, 2),
-                    '狗混子人数': zero_count
+                    '平均差值': round(avg_delta, 2),
+                    '零变化人数': zero_count
                 })
 
         if group_stats:
@@ -449,7 +481,7 @@ class FileAnalyzer:
             plt.rcParams['axes.unicode_minus'] = False
 
             stats_df = pd.DataFrame(group_stats)
-            stats_df = stats_df.sort_values('平均战功差值', ascending=False).reset_index(drop=True)
+            stats_df = stats_df.sort_values('平均差值', ascending=False).reset_index(drop=True)
 
             rows = len(stats_df) + 1
             cols = len(stats_df.columns)
@@ -498,26 +530,31 @@ def _auto_find_two_csvs_in_test_data(root: str) -> Tuple[str, str]:
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='同盟成员战功总量差值分析')
+    parser = argparse.ArgumentParser(description='同盟成员指标差值分析')
     parser.add_argument('--file1', type=str, help='CSV文件1路径（含中文时间戳）')
     parser.add_argument('--file2', type=str, help='CSV文件2路径（含中文时间戳）')
+    parser.add_argument('--metric', choices=['battle', 'power'], default='battle', help='battle=战功总量, power=势力值')
     args = parser.parse_args()
 
     root = os.path.dirname(os.path.abspath(__file__))
     f1, f2 = (args.file1, args.file2) if (args.file1 and args.file2) else _auto_find_two_csvs_in_test_data(root)
 
     analyzer = FileAnalyzer()
-    out = analyzer.analyze_battle_merit_change(f1, f2)
+    if args.metric == 'power':
+        out = analyzer.analyze_power_value_change(f1, f2)
+    else:
+        out = analyzer.analyze_battle_merit_change(f1, f2)
     if not out.get('success'):
         print(f"分析失败: {out.get('error')}")
         raise SystemExit(1)
 
     print(f"时间范围: {out['earlier_ts']} -> {out['later_ts']}")
     print(f"文件顺序: 早={os.path.basename(out['earlier'])} 晚={os.path.basename(out['later'])}")
+    value_field = out.get('value_field', '差值')
     print("结果（仅保留两边同时存在的成员）")
-    print("结果（成员, 战功总量差值, 分组），按分组与差值排序：")
+    print(f"结果（成员, {value_field}, 分组），按分组与差值排序：")
     for row in out['rows']:
-        print(f"{row['成员']}, {row['战功总量差值']}, {row['分组']}")
+        print(f"{row['成员']}, {row[value_field]}, {row['分组']}")
 
     # Save grouped tables as images (truncate timestamps to minute resolution for title)
     def _trim_seconds(ts_str: str) -> str:
@@ -544,7 +581,15 @@ if __name__ == '__main__':
     out_dir = os.path.join(root, 'output')
     # Allow override of high-delta threshold via env var (default 5000)
     high_th = int(os.environ.get('HIGH_DELTA_THRESHOLD', '5000'))
-    pngs = FileAnalyzer.save_grouped_tables_as_images(out['rows'], out_dir, title_prefix, display_title, high_delta_threshold=high_th)
+    pngs = FileAnalyzer.save_grouped_tables_as_images(
+        out['rows'],
+        out_dir,
+        title_prefix,
+        display_title,
+        value_field,
+        out.get('value_label', '指标'),
+        high_delta_threshold=high_th,
+    )
     print("表格图片已生成：")
     for p in pngs:
         print(p)

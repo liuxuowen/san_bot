@@ -103,7 +103,7 @@ class WeChatWorkAPI:
         except Exception as e:
             return {"errcode": -1, "errmsg": str(e)}
     
-    def download_media(self, media_id: str, save_path: str) -> bool:
+    def download_media(self, media_id: str, save_path: str) -> tuple[bool, str | None]:
         """Download media file from WeChat Work"""
         access_token = self.get_access_token()
         url = f"{self.base_url}/media/get"
@@ -114,16 +114,22 @@ class WeChatWorkAPI:
         
         try:
             response = requests.get(url, params=params, stream=True, timeout=30)
-            
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'application/json' in content_type or 'text/plain' in content_type:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {'errcode': -1, 'errmsg': response.text[:200]}
+                return False, str(data)
             if response.status_code == 200:
                 with open(save_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                return True
-            return False
+                return True, None
+            return False, f"HTTP {response.status_code}"
         except Exception as e:
             print(f"Error downloading media: {str(e)}")
-            return False
+            return False, str(e)
     
     def parse_message(self, xml_data: str) -> Dict[str, Any]:
         """Parse XML message from WeChat Work"""

@@ -1,286 +1,191 @@
-# San Bot - 企业微信文件分析机器人
+# San Bot - 微信服务号文件分析助手
 
-基于企业微信的文件分析机器人，使用 Python Flask 框架开发。机器人可以接收2个文件和1个指令，根据指令进行文件对比，并输出结论报告。
+San Bot 现在以微信公众号（服务号）作为默认对话入口，普通微信用户可以直接向服务号发送分析指令与文件，机器人会在后台完成对比分析并通过客服消息返回结论；企业微信应用仍可选用，方便旧流程平滑迁移或双通道部署。
 
-## 功能特性
+## 功能亮点
 
-- ✅ 企业微信机器人集成
-- ✅ 支持多种文件格式 (txt, csv, json, xlsx, xls, pdf, doc, docx)
-- ✅ 智能文件对比分析
-- ✅ 自动生成详细的对比报告
-- ✅ 支持自定义分析指令
-- ✅ RESTful API 接口
+- ✅ 微信服务号原生接入，支持文本指令、文件/图片上传与客服消息回推
+- ✅ 企业微信应用兼容模式，可同时挂载两个入口
+- ✅ 文件对比、同盟战功 CSV 深度分析与分组图表输出
+- ✅ RESTful API (`/api/analyze`) 便于集成到其他系统
+- ✅ 统一的会话管理与后台异步分析，避免回调超时
 
-## 技术栈
+## 架构概览
 
-- Python 3.8+
-- Flask 3.0.0
-- Pandas (Excel文件处理)
-- Requests (企业微信API调用)
+```
+┌───────────────┐      ┌──────────────────────┐
+│  微信服务号    │────▶│ /sanbot/service/callback │
+└───────────────┘      │  (Flask Blueprint)   │
+                        └────────────┬─────────┘
+                                      │
+┌───────────────┐      ┌──────────────▼─────────────┐
+│ 企业微信 (可选) │────▶│ /wechat/work/callback      │
+└───────────────┘      └──────────────┬─────────────┘
+                                      │
+                         ┌────────────▼────────────┐
+                         │ SessionStore + Analyzer │
+                         └────────────┬────────────┘
+                                      │
+                         ┌────────────▼────────────┐
+                         │ FileAnalyzer / 图像渲染 │
+                         └─────────────────────────┘
+```
 
-## 快速开始
+- `sanbot/app_factory.py` 负责装配 Flask、路由与依赖
+- `sanbot/session_store.py` 管理每个用户的指令与文件
+- `sanbot/services/analysis.py` 在后台线程中运行长耗时分析
+- `sanbot/wechat/service_account.py` / `wechat_api.py` 提供统一的消息发送接口
 
-### 1. 环境要求
+## 环境准备
 
-- Python 3.8 或更高版本
-- pip 包管理器
-
-### 2. 安装依赖
+1. 克隆并进入仓库
 
 ```bash
-# 克隆项目
 git clone https://github.com/liuxuowen/san_bot.git
 cd san_bot
+```
 
-# 创建虚拟环境（推荐）
+2. 安装依赖（建议使用虚拟环境）
+
+```bash
 python -m venv venv
-
-# 激活虚拟环境
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
 source venv/bin/activate
-
-# 安装依赖包
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
-
-复制 `.env.example` 文件为 `.env`，并填入你的企业微信配置：
+3. 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env` 文件，填入以下信息：
+`.env` 需要至少配置以下字段：
 
-```ini
-# Flask 配置
-SECRET_KEY=your-secret-key-here
+```
+# 微信服务号（推荐）
+FUWUHAO_APP_ID=wx...
+FUWUHAO_APP_SECRET=...
+FUWUHAO_TOKEN=与微信后台保持一致
+FUWUHAO_ENCODING_AES_KEY=可留空（当前仅支持明文模式）
+
+# （可选）企业微信
+WECHAT_CORP_ID=
+WECHAT_CORP_SECRET=
+WECHAT_AGENT_ID=
+WECHAT_TOKEN=
+WECHAT_ENCODING_AES_KEY=
+
+# 通用
+SECRET_KEY=your-secret
 FLASK_ENV=development
-DEBUG=True
-HOST=0.0.0.0
-PORT=5000
-
-# 企业微信配置
-WECHAT_CORP_ID=your-corp-id           # 企业ID
-WECHAT_CORP_SECRET=your-corp-secret   # 应用Secret
-WECHAT_AGENT_ID=your-agent-id         # 应用AgentId
-WECHAT_TOKEN=your-token               # Token（用于验证）
-WECHAT_ENCODING_AES_KEY=your-aes-key  # EncodingAESKey
+PORT=7000
+HIGH_DELTA_THRESHOLD=5000
 ```
 
-### 4. 运行应用
+> ⚠️ 当前版本仅支持 **明文模式** 的微信服务号回调；若后台使用安全模式，请先切换到明文。
+
+## 运行与调试
+
+### 使用启动脚本
 
 ```bash
-python app.py
+./start.sh
 ```
 
-服务将在 `http://0.0.0.0:5000` 启动。
+脚本会自动创建虚拟环境、安装依赖并运行 `python app.py`。
 
-## 使用指南
-
-### 企业微信机器人使用流程
-
-1. **发送指令**: 在企业微信中向机器人发送文本消息，描述分析需求
-   - 例如："对比两个文件的差异"
-   - 例如："分析配置文件的变更"
-
-2. **上传第一个文件**: 发送第一个需要对比的文件
-
-3. **上传第二个文件**: 发送第二个需要对比的文件
-
-4. **获取报告**: 机器人自动分析并返回详细的对比报告
-
-### API 接口使用
-
-#### POST /api/analyze
-
-用于直接通过 API 进行文件分析。
-
-**请求参数:**
-- `file1`: 第一个文件（multipart/form-data）
-- `file2`: 第二个文件（multipart/form-data）
-- `instruction`: 分析指令（可选，默认："对比两个文件的差异"）
-
-**示例:**
+### 手动启动
 
 ```bash
-curl -X POST http://localhost:5000/api/analyze \
-  -F "file1=@file1.txt" \
-  -F "file2=@file2.txt" \
-  -F "instruction=对比两个配置文件的差异"
+FLASK_ENV=development python app.py
 ```
 
-**响应示例:**
+服务默认监听 `http://0.0.0.0:7000`，可在 `.env` 中修改 `HOST/PORT`。
 
-```json
-{
-  "success": true,
-  "report": "文件对比分析报告...",
-  "details": {
-    "total_lines_file1": 100,
-    "total_lines_file2": 105,
-    "added_lines": 8,
-    "removed_lines": 3,
-    "common_lines": 92,
-    "similarity_percentage": 92.5
-  }
-}
+### API 自测
+
+```bash
+curl -X POST http://localhost:7000/api/analyze \
+  -F "file1=@/path/a.csv" \
+  -F "file2=@/path/b.csv" \
+  -F "instruction=对比两个报表"
 ```
+
+## 微信服务号接入指南
+
+1. 登录 [mp.weixin.qq.com](https://mp.weixin.qq.com/)
+2. 进入「开发」→「基本配置」→「服务器配置」
+3. 启用服务器配置，设置：
+   - URL: `https://<你的域名>/sanbot/service/callback`
+   - Token: 使用 `.env` 中的 `FUWUHAO_TOKEN`
+   - 消息加解密方式: 明文模式
+4. 在「接口权限」中确认客服消息能力已开通
+5. 交互流程：
+   - 用户发送文本 → 机器人记录指令并提示上传
+   - 用户上传两个文件/图片 → 后台分析 → 通过客服消息回传结论或图片
+
+### 服务号指令说明
+
+- 当前仅支持两条分析指令，均需先发送文本指令再上传两份 **CSV** 文件：
+  - `战功差`：比对两份同盟统计 CSV，统计所有成员的「战功总量」差值，并按照分组分片生成榜单及图片。
+  - `势力值`：比对两份同盟统计 CSV，统计所有成员的「势力值」差值，输出方式同上。
+- 任何其他指令都会得到提示 `暂不支持指令，目前仅支持【战功差】以及【势力值】`，不会记录到会话中。
+- 若未先发送有效指令即上传文件，系统会引导用户先选择指令再重新上传，以保证分析链路明确。
+
+## 企业微信兼容模式（可选）
+
+- 登录企业微信管理后台 → 应用管理 → 创建应用
+- 在应用的「接收消息」中配置 URL：`https://<域名>/wechat/work/callback`
+- 保持 `.env` 中的 `WECHAT_*` 参数与后台一致
+- 两个通道共用同一套会话与分析逻辑
 
 ## 项目结构
 
 ```
-san_bot/
-├── app.py                  # Flask 主应用
-├── config.py              # 配置文件
-├── wechat_api.py          # 企业微信 API 封装
-├── file_analyzer.py       # 文件分析核心逻辑
-├── requirements.txt       # Python 依赖包
-├── .env.example          # 环境变量示例
-├── .gitignore            # Git 忽略文件
-├── README.md             # 项目文档
-└── uploads/              # 文件上传目录（自动创建）
+.
+├── app.py                     # 入口，仅负责加载 create_app
+├── sanbot/
+│   ├── __init__.py            # 导出 create_app
+│   ├── app_factory.py         # Flask 工厂与依赖装配
+│   ├── routers/
+│   │   ├── api.py             # /api/analyze
+│   │   ├── service_account.py # /sanbot/service/callback
+│   │   └── work.py            # /wechat/work/callback
+│   ├── services/
+│   │   └── analysis.py        # 异步分析任务
+│   ├── session_store.py       # 会话管理
+│   └── wechat/
+│       └── service_account.py # 服务号 API 封装
+├── file_analyzer.py           # 核心分析逻辑（兼容旧引用）
+├── wechat_api.py              # 企业微信 API 封装
+├── resources/                 # 模板 / 头图 / 成语 JSON
+├── requirements.txt
+├── README.md
+└── ...
 ```
 
-## 支持的文件格式
+## 测试与演示
 
-- 文本文件: `.txt`
-- CSV 文件: `.csv`
-- JSON 文件: `.json`
-- Excel 文件: `.xlsx`, `.xls`
-- Word 文档: `.doc`, `.docx`
-- PDF 文档: `.pdf`
-
-## 分析报告内容
-
-机器人会生成包含以下信息的详细报告：
-
-- 📋 分析指令
-- 📁 文件信息（文件名）
-- 📊 对比结果
-  - 各文件总行数
-  - 相似度百分比
-  - 新增行数
-  - 删除行数
-  - 相同行数
-- 📝 智能结论
-
-## 企业微信配置指南
-
-### 1. 创建企业微信应用
-
-1. 登录[企业微信管理后台](https://work.weixin.qq.com/)
-2. 进入「应用管理」→「应用」→「创建应用」
-3. 填写应用信息，上传应用logo
-4. 创建成功后，记录以下信息：
-   - `AgentId`（应用ID）
-   - `Secret`（应用密钥）
-
-### 2. 获取企业ID
-
-在「我的企业」页面底部可以找到「企业ID」
-
-### 3. 配置接收消息
-
-1. 在应用详情页，点击「接收消息」的「设置API接收」
-2. 填入回调URL: `http://your-domain.com/wechat/callback`
-3. 设置 Token 和 EncodingAESKey（随机生成或自定义）
-4. 保存配置
-
-### 4. 服务器部署
-
-确保你的服务器：
-- 可以被企业微信服务器访问（公网IP或域名）
-- 已开放配置的端口（默认5000）
-- 支持 HTTPS（生产环境推荐）
-
-## 开发
-
-### 运行开发服务器
+- CLI 演示：`python test_demo.py`
+- 语法/依赖检测示例：
 
 ```bash
-export FLASK_ENV=development
-python app.py
+python -m compileall sanbot app.py
 ```
 
-### 调试模式
+## 部署建议
 
-在 `.env` 文件中设置：
-```
-DEBUG=True
-```
+1. 使用 `deploy.sh` 将代码同步到服务器并创建虚拟环境
+2. 生产环境建议使用 HTTPS，`HOST` 设为 `0.0.0.0`
+3. 若使用多进程（Gunicorn 等），请将 `SessionStore` 替换为 Redis/DB 实现
+4. 企业微信与服务号可同时配置，必要时在反向代理层拆分路径
 
-## 生产环境部署
+## 常见问题
 
-### 使用 Gunicorn
+| 问题 | 解决方案 |
+| --- | --- |
+| 服务号校验失败 | 确保 Token 一致、消息模式为明文，并检查公网可达性 |
+| 上传后无响应 | 查看服务器日志，确认分析线程是否异常；必要时增大 `HIGH_DELTA_THRESHOLD` 以减少图表渲染量 |
+| 需要更大文件 | 修改 `.env` 或 `config.py` 中的 `MAX_CONTENT_LENGTH`，并确保反向代理允许更大请求 |
 
-```bash
-pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
-```
-
-### 使用 Docker（推荐）
-
-创建 `Dockerfile`:
-
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
-```
-
-构建和运行：
-
-```bash
-docker build -t san_bot .
-docker run -p 5000:5000 --env-file .env san_bot
-```
-
-## 安全建议
-
-1. 生产环境务必设置强密码的 `SECRET_KEY`
-2. 不要将 `.env` 文件提交到代码仓库
-3. 使用 HTTPS 保护数据传输
-4. 定期更新依赖包版本
-5. 限制上传文件大小和类型
-
-## 故障排除
-
-### 问题1: 企业微信回调验证失败
-
-- 检查 Token 和 EncodingAESKey 配置是否正确
-- 确认回调 URL 可以被外网访问
-- 查看服务器日志获取详细错误信息
-
-### 问题2: 文件上传失败
-
-- 检查 `uploads/` 目录是否存在且有写入权限
-- 确认文件大小不超过限制（默认16MB）
-- 检查文件格式是否在支持列表中
-
-### 问题3: Access Token 获取失败
-
-- 验证 `WECHAT_CORP_ID` 和 `WECHAT_CORP_SECRET` 配置正确
-- 检查网络连接是否正常
-- 确认企业微信应用状态正常
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 许可证
-
-MIT License
-
-## 联系方式
-
-如有问题，请提交 Issue 或联系项目维护者。
+如需新特性或发现问题，欢迎提交 Issue / PR。
