@@ -64,6 +64,10 @@
             justify-content: center;
             margin-bottom: 20px;
         }
+        /* 手机端隐藏所有操作按钮 */
+        @media (max-width: 768px) {
+            .actions { display: none !important; }
+        }
         .btn {
             padding: 10px 24px;
             border-radius: 8px;
@@ -87,6 +91,22 @@
             text-align: center;
             margin-top: 20px;
             line-height: 1.5;
+        }
+        .mobile-tip {
+            display: block;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #333;
+        }
+        .mobile-tip b {
+            color: #fa5151;
+            font-size: 16px;
+            font-weight: 900;
+            background: #fff0f0;
+            padding: 2px 4px;
+            border-radius: 6px;
+            border: 1px solid #ffa39e;
+            margin: 0 4px;
         }
         
         /* Toast 提示 */
@@ -137,13 +157,13 @@
         </div>
 
         <div class="actions">
-            <button class="btn btn-secondary" onclick="copyImage()">复制图片</button>
+            <button class="btn btn-secondary btn-copy" onclick="copyImage()">复制图片</button>
             <a href="{{ images[0].url }}" download="{{ images[0].filename }}" class="btn btn-primary" id="downloadBtn">保存图片</a>
         </div>
 
         <div class="note">
-            提示：图片仅临时保存在服务器，每天凌晨5点会自动清理，请及时保存。<br>
-            如需分享，请长按图片发送给朋友或保存到手机。
+            图片仅临时保存在服务器，每天凌晨5点会自动清理。<br>
+            <span class="mobile-tip">手机端请<b>长按图片</b>发送给朋友或保存到相册。</span>
         </div>
     </div>
 
@@ -173,6 +193,12 @@
         async function copyImage() {
             if (!previewImage.src) return;
             
+            // 检查浏览器是否支持
+            if (!navigator.clipboard || !navigator.clipboard.write) {
+                showToast('当前浏览器不支持自动复制，请长按图片操作');
+                return;
+            }
+
             try {
                 const response = await fetch(previewImage.src);
                 const blob = await response.blob();

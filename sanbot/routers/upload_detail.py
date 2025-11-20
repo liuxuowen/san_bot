@@ -149,7 +149,7 @@ def create_upload_detail_blueprint(app_config):
                 </tr>
               </thead>
               <tbody>
-                {% for item in history %}
+                {% for item in history_table %}
                 <tr class=\"{% if item.upload_id == highlight_upload_id %}row-highlight{% endif %}\">
                   <td>{{ item.ts_label }}</td>
                   <td>{{ item.battle_total }}</td>
@@ -161,7 +161,7 @@ def create_upload_detail_blueprint(app_config):
                   <td><a class=\"back\" style=\"margin:0;\" href=\"/sanbot/service/upload-detail?token={{ token }}&upload_id={{ item.upload_id }}\">查看</a></td>
                 </tr>
                 {% endfor %}
-                {% if not history %}
+                {% if not history_table %}
                 <tr><td colspan=8 class=\"empty\">暂无成员历史记录</td></tr>
                 {% endif %}
               </tbody>
@@ -173,7 +173,7 @@ def create_upload_detail_blueprint(app_config):
       <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js\" crossorigin=\"anonymous\"></script>
       <script>
         const labels = {{ chart_labels|safe }};
-                {% for item in history_table %}
+        const battleSeries = {{ chart_battle_data|safe }};
         const powerSeries = {{ chart_power_data|safe }};
         const ctx = document.getElementById('trendChart');
         if (ctx && labels.length) {
@@ -185,7 +185,7 @@ def create_upload_detail_blueprint(app_config):
                 {
                   label: '战功',
                   data: battleSeries,
-                {% if not history_table %}
+                  borderColor: '#1677ff',
                   backgroundColor: 'rgba(22,119,255,0.12)',
                   borderWidth: 2,
                   tension: 0.2,
@@ -206,6 +206,12 @@ def create_upload_detail_blueprint(app_config):
               responsive: true,
               interaction: { mode: 'index', intersect: false },
               scales: {
+                x: {
+                  ticks: {
+                    autoSkip: true,
+                    maxTicksLimit: 8
+                  }
+                },
                 y: {
                   beginAtZero: false,
                   ticks: { precision: 0 }
@@ -303,6 +309,7 @@ def create_upload_detail_blueprint(app_config):
         for row in history_rows:
             ts_value = row.get("ts")
             ts_label = ts_value.strftime("%Y-%m-%d %H:%M") if hasattr(ts_value, "strftime") else str(ts_value)
+            chart_label = ts_value.strftime("%m/%d") if hasattr(ts_value, "strftime") else str(ts_value)
             prepared_history.append(
                 {
                     "upload_id": row.get("upload_id"),
@@ -315,7 +322,7 @@ def create_upload_detail_blueprint(app_config):
                     "group_name": row.get("group_name", "-"),
                 }
             )
-            labels.append(ts_label)
+            labels.append(chart_label)
             battle_series.append(int(row.get("battle_total", 0) or 0))
             power_series.append(int(row.get("power_value", 0) or 0))
 

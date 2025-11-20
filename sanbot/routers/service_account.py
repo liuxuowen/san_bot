@@ -671,7 +671,7 @@ class ServiceAccountManager:
         )
         self.wechat_api.send_text_message(
             user_id,
-            "任务启动，预计耗时约 5-10 秒，请耐心等待。",
+            "任务启动，预计耗时约 2-3 秒，请耐心等待。",
         )
 
         error, recommendation = self._compute_copper_slave_recommendation(user_id, season_code, (coord_x, coord_y))
@@ -885,8 +885,8 @@ class ServiceAccountManager:
         self._cancel_pending_copper_sessions(user_id)
         current_app.logger.info("Instruction help requested user=%s", user_id)
         lines = [
-            "指令说明",
-            "格式：指令 坐标X 坐标Y（分隔符支持空格、逗号、顿号、斜杠）",
+            "指令说明（因只有资源州铜坐标数据，因此出生州坐标无法正确推荐）",
+            "格式：指令 坐标X 坐标Y（分隔符支持空格、逗号、斜杠）",
             "坐标范围：1-1500",
             "",
             "铜 / 8铜 / 9铜 / 10铜 + 坐标 → 铜矿雷达查询",
@@ -1123,6 +1123,8 @@ class ServiceAccountManager:
             )
 
         upload_history = list_uploads_by_user(current_app.config, user_id)
+        for item in upload_history:
+            item["ts"] = FileAnalyzer._format_ts_shichen(item["ts"])
 
         if request.method == "GET":
             # Log successful entry into data management (upload) page
@@ -1150,6 +1152,8 @@ class ServiceAccountManager:
             if ok:
                 current_app.logger.info("DataMgmt delete user=%s id=%s result=success", user_id, upload_id)
                 upload_history = list_uploads_by_user(current_app.config, user_id)
+                for item in upload_history:
+                    item["ts"] = FileAnalyzer._format_ts_shichen(item["ts"])
                 return render_template(
                     "upload.html",
                     message="删除成功。",
@@ -1161,6 +1165,8 @@ class ServiceAccountManager:
             else:
                 current_app.logger.info("DataMgmt delete user=%s id=%s result=failure", user_id, upload_id)
                 upload_history = list_uploads_by_user(current_app.config, user_id)
+                for item in upload_history:
+                    item["ts"] = FileAnalyzer._format_ts_shichen(item["ts"])
                 return render_template(
                     "upload.html",
                     message="删除失败：记录不存在或无权限。",
@@ -1300,6 +1306,8 @@ class ServiceAccountManager:
 
         # refresh history
         upload_history = list_uploads_by_user(current_app.config, user_id)
+        for item in upload_history:
+            item["ts"] = FileAnalyzer._format_ts_shichen(item["ts"])
         parts = [f"成功 {successes} 个"]
         if skipped:
             parts.append(f"跳过 {skipped} 个（重复时间）")
@@ -1448,12 +1456,12 @@ class ServiceAccountManager:
             if len(friendly_name) > 60:
                 friendly_name = f"{metric_info['label']}对比_{slug[:12]}_{count}人.jpg"
             
-            token = self.compare_image_serializer.dumps({
+            image_token = self.compare_image_serializer.dumps({
                 "user_id": user_id,
                 "file": filename,
                 "name": friendly_name,
             })
-            download_link = f"{base_url}/sanbot/service/compare-image?token={token}"
+            download_link = f"{base_url}/sanbot/service/compare-image?token={image_token}"
             
             images_data.append({
                 "group": group_label,
