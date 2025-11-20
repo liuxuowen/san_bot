@@ -1,0 +1,23 @@
+[Unit]
+Description=San Bot Service
+After=network.target
+
+[Service]
+Type=simple
+# 建议修改为非 root 用户，例如: User=ubuntu
+User=root
+# 关键：请修改为项目所在的绝对路径
+WorkingDirectory=/opt/projects/san_bot
+# 关键：请修改为虚拟环境中 python 的绝对路径
+ExecStart=/opt/projects/san_bot/venv/bin/python app.py
+# 自动重启配置
+Restart=always
+RestartSec=5
+# 加载环境变量
+EnvironmentFile=/opt/projects/san_bot/.env
+# 标准输出和错误日志（移除 append 配置，改用默认的 journal）
+# StandardOutput=append:/opt/projects/logs/sanbot.log
+# StandardError=append:/opt/projects/logs/sanbot.log
+
+[Install]
+WantedBy=multi-user.target

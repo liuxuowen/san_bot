@@ -485,7 +485,7 @@ class FileAnalyzer:
                 idiom_phrase = str(idiom_entry.get('成语', '')).strip()
                 idiom_story = str(idiom_entry.get('典故', '')).strip()
                 if idiom_phrase:
-                    idiom_lines.append((idiom_title_font, f"成语：{idiom_phrase}"))
+                    idiom_lines.append((idiom_title_font, f"{idiom_phrase}"))
                 if idiom_story:
                     story_lines = wrap_text(idiom_body_font, f"典故：{idiom_story}", max_text_width)
                     idiom_lines.extend((idiom_body_font, line) for line in story_lines)
@@ -592,7 +592,14 @@ class FileAnalyzer:
             safe_group = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]+", "_", group_name) or "group"
             file_name = f"compare_{metric_label}_{safe_group}_{uuid4().hex[:8]}.jpg"
             file_path = os.path.join(output_dir, file_name)
-            image.save(file_path, format='JPEG', quality=90, subsampling=0)
+            image.save(
+                file_path,
+                format='JPEG',
+                quality=78,
+                subsampling=2,
+                optimize=True,
+                progressive=True,
+            )
             image_results.append({
                 'group': group_name,
                 'path': file_path,

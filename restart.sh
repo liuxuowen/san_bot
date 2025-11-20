@@ -20,7 +20,8 @@ source venv/bin/activate
 # Stop existing instances
 echo "Stopping existing San Bot processes (if any)..."
 PROJECT_ROOT=$(cd "$(dirname "$0")" && pwd)
-pkill -f "${PROJECT_ROOT}/app.py" 2>/dev/null || true
+# pkill -f "${PROJECT_ROOT}/app.py" 2>/dev/null || true
+
 
 # Install dependencies
 echo "Installing dependencies..."
@@ -41,15 +42,17 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
-# Start the application in background with log redirection
+# Restart service via systemd
 echo ""
-echo "Starting San Bot in background..."
-echo "Server will be available at http://0.0.0.0:7000 (override via .env)"
-echo "Logs: /opt/projects/logs/sanbot.log"
-echo ""
+echo "Restarting San Bot service..."
+# 尝试重启服务，如果失败（例如服务未安装）则提示
+if sudo systemctl restart sanbot; then
+    echo "Service restarted successfully."
+    echo "Current Status:"
+    sudo systemctl status sanbot --no-pager | head -n 10
+else
+    echo "ERROR: Failed to restart 'sanbot' service."
+    echo "Please ensure the service is installed and configured."
+    echo "See sanbot.service for a template."
+fi
 
-LOG_DIR=/opt/projects/logs
-mkdir -p "$LOG_DIR"
-
-nohup python app.py >> "$LOG_DIR/sanbot.log" 2>&1 &
-echo "San Bot started with PID $!"

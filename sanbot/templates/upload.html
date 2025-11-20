@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>数据管理中心</title>
+    <style>
+        body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; margin: 0; padding: 20px; background: #fafafa; }
+        .card { max-width: 520px; margin: auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+        .card + .card { margin-top: 16px; }
+        h1 { font-size: 20px; margin-bottom: 12px; }
+        label { display: block; margin-top: 16px; font-weight: 600; }
+        input[type=file] { margin-top: 8px; width: 100%; padding: 14px; height: 48px; font-size: 16px; }
+        button { margin-top: 24px; width: 100%; padding: 12px; background: #07c160; border: none; border-radius: 8px; color: #fff; font-size: 16px; }
+        .note { margin-top: 16px; font-size: 14px; color: #666; }
+        .error { color: #c0392b; margin-top: 12px; }
+        .success { color: #1a7f37; margin-top: 12px; }
+        /* 上传记录列表样式 */
+        .uploads-list { list-style: none; padding-left: 0; margin: 0; }
+        .uploads-list li {
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            white-space: nowrap;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid #dcdfe6;
+        }
+        .analysis-actions { display:flex; gap:8px; margin:6px 0 0; }
+        .analysis-btn { padding:6px 16px; border-radius:6px; border:1px solid #07c160; background:#07c160; color:#fff; font-size:13px; cursor:pointer; transition:opacity 0.2s ease, transform 0.1s ease; }
+        .analysis-btn.is-disabled { background:#f1f1f1; border-color:#d9d9d9; color:#8c8c8c; cursor:not-allowed; opacity:0.7; }
+        .analysis-btn:not(.is-disabled):active { transform: translateY(1px); }
+        .upload-text { overflow: hidden; text-overflow: ellipsis; line-height: 28px; flex:1; cursor:pointer; user-select:none; display:block; outline:none; }
+        .upload-text:focus-visible .upload-text-inner { box-shadow:0 0 0 2px rgba(7,193,96,0.3); }
+        .upload-text-inner { display:inline-block; padding:2px 8px; border:1px solid transparent; border-radius:6px; transition:border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease; }
+        .upload-item.is-selected { background:rgba(7,193,96,0.05); border-radius:8px; }
+        .upload-item.is-selected .upload-text-inner { border-color:#07c160; background:rgba(7,193,96,0.12); color:#075c34; font-weight:600; }
+        .delete-btn {
+            background: #fff;
+            color: #c0392b;
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            display: inline-flex;
+            align-items: center;
+            height: 28px;
+            line-height: 28px;
+            padding: 0 10px;
+            font-size: 12px;
+            margin-top: 0; /* 覆盖全局 button 顶部外边距 */
+            width: auto;    /* 覆盖全局 button 宽度 */
+        }
+        .delete-btn:hover { background: #fff5f5; }
+        .member-link { color:#1677ff; text-decoration:none; }
+        .member-link:hover { text-decoration:underline; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>上传同盟统计数据</h1>
+        <p>上传最新同盟统计，系统会保存成员数据用于后续分析，一个账号只支持一个同盟。</p>
+        {% if message %}
+            <p class="{{ 'success' if success else 'error' }}">{{ message }}</p>
+        {% endif %}
+        {% if show_form %}
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="token" value="{{ token }}" />
+            <label>选择文件（可多选，三战导出的原始.csv）</label>
+            <input type="file" name="files" accept=".csv" multiple />
+            <p class="note">文件名需包含导出时间（示例：同盟统计2025年11月15日23时00分32秒.csv）。部分安卓设备暂不支持多选，可多次选择逐个上传。</p>
+        </form>
+        {% endif %}
+    </div>
+        {% if uploads %}
+        <div class="card">
+            <h2>我的数据</h2>
+            <div class="analysis-actions" role="group" aria-label="数据对比分析">
+                <button type="button" class="analysis-btn is-disabled" data-action="battle" data-enabled="false" aria-disabled="true">战功</button>
+                <button type="button" class="analysis-btn is-disabled" data-action="power" data-enabled="false" aria-disabled="true">势力</button>
+                <button type="button" class="analysis-btn is-disabled" data-action="contrib" data-enabled="false" aria-disabled="true">贡献</button>
+            </div>
+            <ul class="uploads-list">
+            {% for u in uploads %}
+                <li class="upload-item" data-upload-id="{{ u.id }}">
+                    <span class="upload-text" role="button" tabindex="0" aria-pressed="false">
+                        <span class="upload-text-inner">{{ u.ts }}（<a class="member-link" href="/sanbot/service/upload-detail?token={{ token }}&upload_id={{ u.id }}">成员数：{{ u.member_count }}</a>）</span>
+                    </span>
+                    <form class="delete-form" method="post" onsubmit="return confirm('确认删除该上传记录？此操作不可恢复。');" style="margin:0;">
+                        <input type="hidden" name="token" value="{{ token }}" />
+                        <input type="hidden" name="action" value="delete" />
+                        <input type="hidden" name="upload_id" value="{{ u.id }}" />
+                        <button class="delete-btn" type="submit">删除</button>
+                    </form>
+                </li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    <script>
+        (function() {
+            const uploadForm = document.querySelector('form[method="post"][enctype="multipart/form-data"]');
+            const uploadInput = uploadForm ? uploadForm.querySelector('input[type="file"][name="files"]') : null;
+            const tokenInput = uploadForm ? uploadForm.querySelector('input[name="token"]') : null;
+            let isAutoUploading = false;
+
+            if (uploadForm && uploadInput && tokenInput) {
+                uploadInput.addEventListener('change', async () => {
+                    if (isAutoUploading) {
+                        return;
+                    }
+                    const fileList = uploadInput.files;
+                    if (!fileList || !fileList.length) {
+                        return;
+                    }
+                    const files = Array.from(fileList);
+                    const uploadUrl = uploadForm.getAttribute('action') || window.location.href;
+                    const formData = new FormData();
+                    formData.append('token', tokenInput.value);
+                    files.forEach((file) => {
+                        formData.append('files', file, file.name);
+                    });
+                    uploadInput.value = '';
+                    uploadInput.disabled = true;
+                    isAutoUploading = true;
+                    try {
+                        const response = await fetch(uploadUrl, {
+                            method: 'POST',
+                            body: formData,
+                            credentials: 'same-origin',
+                        });
+                        if (!response.ok) {
+                            throw new Error('上传失败，请稍后重试。');
+                        }
+                        const html = await response.text();
+                        document.open();
+                        document.write(html);
+                        document.close();
+                    } catch (error) {
+                        isAutoUploading = false;
+                        uploadInput.disabled = false;
+                        window.alert(error instanceof Error ? error.message : '上传失败，请稍后重试。');
+                    }
+                });
+            }
+
+            const actionButtons = Array.from(document.querySelectorAll('.analysis-btn'));
+            if (!actionButtons.length) {
+                return;
+            }
+            const uploadItems = Array.from(document.querySelectorAll('.upload-item'));
+            const selectedIds = [];
+            const compareToken = {{ token|tojson }};
+            let isSubmitting = false;
+
+            const showAlert = (message) => {
+                if (message) {
+                    window.alert(message);
+                }
+            };
+
+            const updateButtons = () => {
+                const enabled = selectedIds.length === 2 && !isSubmitting;
+                actionButtons.forEach((btn) => {
+                    btn.dataset.enabled = enabled ? 'true' : 'false';
+                    btn.setAttribute('aria-disabled', (!enabled).toString());
+                    btn.classList.toggle('is-disabled', !enabled);
+                });
+            };
+
+            const toggleSelection = (item) => {
+                if (!item || isSubmitting) {
+                    return;
+                }
+                const uploadId = item.dataset.uploadId;
+                if (!uploadId) {
+                    return;
+                }
+                const textEl = item.querySelector('.upload-text');
+                const isSelected = item.classList.contains('is-selected');
+                if (isSelected) {
+                    item.classList.remove('is-selected');
+                    if (textEl) {
+                        textEl.setAttribute('aria-pressed', 'false');
+                    }
+                    const idx = selectedIds.indexOf(uploadId);
+                    if (idx !== -1) {
+                        selectedIds.splice(idx, 1);
+                    }
+                } else {
+                    if (selectedIds.length >= 2) {
+                        return;
+                    }
+                    item.classList.add('is-selected');
+                    if (textEl) {
+                        textEl.setAttribute('aria-pressed', 'true');
+                    }
+                    selectedIds.push(uploadId);
+                }
+                updateButtons();
+            };
+
+            const triggerAnalysis = (btn) => {
+                if (!btn || isSubmitting) {
+                    return;
+                }
+                if (btn.dataset.enabled !== 'true') {
+                    showAlert('请选择两条上传记录进行对比');
+                    return;
+                }
+                if (!compareToken) {
+                    showAlert('页面凭证已失效，请刷新后重试。');
+                    return;
+                }
+                if (selectedIds.length !== 2) {
+                    showAlert('请选择两条上传记录进行对比');
+                    return;
+                }
+                const action = btn.dataset.action;
+                if (!action) {
+                    showAlert('无法识别的分析类型');
+                    return;
+                }
+                
+                // Create and submit a form to navigate to the result page
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/sanbot/service/compare';
+                
+                const tokenInput = document.createElement('input');
+                tokenInput.type = 'hidden';
+                tokenInput.name = 'token';
+                tokenInput.value = compareToken;
+                form.appendChild(tokenInput);
+                
+                const metricInput = document.createElement('input');
+                metricInput.type = 'hidden';
+                metricInput.name = 'metric';
+                metricInput.value = action;
+                form.appendChild(metricInput);
+                
+                selectedIds.slice(0, 2).forEach(id => {
+                    const idInput = document.createElement('input');
+                    idInput.type = 'hidden';
+                    idInput.name = 'upload_ids[]';
+                    idInput.value = id;
+                    form.appendChild(idInput);
+                });
+                
+                document.body.appendChild(form);
+                form.submit();
+            };
+
+            uploadItems.forEach((item) => {
+                const textEl = item.querySelector('.upload-text');
+                if (!textEl) {
+                    return;
+                }
+                textEl.addEventListener('click', (event) => {
+                    if (event.target.closest('a')) {
+                        return;
+                    }
+                    toggleSelection(item);
+                });
+                textEl.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        toggleSelection(item);
+                    }
+                });
+            });
+
+            const actionContainer = document.querySelector('.analysis-actions');
+            if (actionContainer) {
+                actionContainer.addEventListener('click', (event) => {
+                    const btn = event.target.closest('.analysis-btn');
+                    if (!btn) {
+                        return;
+                    }
+                    if (btn.dataset.enabled !== 'true') {
+                        showAlert('请选择两条上传记录进行对比');
+                        return;
+                    }
+                    triggerAnalysis(btn);
+                });
+            }
+
+            updateButtons();
+        })();
+    </script>
+</body>
+</html>

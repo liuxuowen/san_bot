@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>数据对比结果</title>
+    <style>
+        body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; margin: 0; padding: 20px; background: #fafafa; }
+        .container { max-width: 800px; margin: auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+        h1 { font-size: 20px; margin-bottom: 16px; text-align: center; }
+        .meta-info { text-align: center; color: #666; font-size: 14px; margin-bottom: 20px; }
+        
+        /* 分组选择器 */
+        .group-selector {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #eee;
+        }
+        .group-radio { display: none; }
+        .group-label {
+            padding: 6px 16px;
+            background: #f5f5f5;
+            border-radius: 20px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid #e0e0e0;
+            user-select: none;
+        }
+        .group-radio:checked + .group-label {
+            background: #07c160;
+            color: #fff;
+            border-color: #07c160;
+            font-weight: 500;
+        }
+
+        /* 图片展示区 */
+        .image-container {
+            text-align: center;
+            margin-bottom: 24px;
+            min-height: 300px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f9f9f9;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .result-image {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        /* 操作按钮 */
+        .actions {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        .btn {
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 15px;
+            cursor: pointer;
+            border: none;
+            font-weight: 500;
+            transition: opacity 0.2s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .btn:active { opacity: 0.8; }
+        .btn-primary { background: #07c160; color: #fff; }
+        .btn-secondary { background: #f0f0f0; color: #333; }
+        
+        .note {
+            font-size: 12px;
+            color: #999;
+            text-align: center;
+            margin-top: 20px;
+            line-height: 1.5;
+        }
+        
+        /* Toast 提示 */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.75);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        .toast.show { opacity: 1; }
+        .back { display:inline-block; margin-bottom:16px; color:#1677ff; text-decoration:none; font-size: 14px; }
+        .back:hover { text-decoration:underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a class="back" href="/sanbot/service/upload?token={{ token }}">← 返回我的数据</a>
+        <h1>{{ metric_label }}对比结果</h1>
+        <div class="meta-info">
+            {{ earlier_ts }} → {{ later_ts }}
+        </div>
+
+        <div class="group-selector">
+            {% for item in images %}
+            <input type="radio" name="group" id="g_{{ loop.index }}" class="group-radio" 
+                   value="{{ item.url }}" 
+                   data-filename="{{ item.filename }}"
+                   {% if loop.first %}checked{% endif %}>
+            <label for="g_{{ loop.index }}" class="group-label">{{ item.group }} ({{ item.count }}人)</label>
+            {% endfor %}
+        </div>
+
+        <div class="image-container">
+            {% if images %}
+            <img src="{{ images[0].url }}" alt="对比结果" class="result-image" id="previewImage">
+            {% else %}
+            <p style="color:#999">暂无图片生成</p>
+            {% endif %}
+        </div>
+
+        <div class="actions">
+            <button class="btn btn-secondary" onclick="copyImage()">复制图片</button>
+            <a href="{{ images[0].url }}" download="{{ images[0].filename }}" class="btn btn-primary" id="downloadBtn">保存图片</a>
+        </div>
+
+        <div class="note">
+            提示：图片仅临时保存在服务器，每天凌晨5点会自动清理，请及时保存。<br>
+            如需分享，请长按图片发送给朋友或保存到手机。
+        </div>
+    </div>
+
+    <div id="toast" class="toast">已复制到剪贴板</div>
+
+    <script>
+        const previewImage = document.getElementById('previewImage');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const radios = document.querySelectorAll('.group-radio');
+        const toast = document.getElementById('toast');
+
+        // 切换分组
+        radios.forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    const url = e.target.value;
+                    const filename = e.target.dataset.filename;
+                    
+                    previewImage.src = url;
+                    downloadBtn.href = url;
+                    downloadBtn.download = filename;
+                }
+            });
+        });
+
+        // 复制图片
+        async function copyImage() {
+            if (!previewImage.src) return;
+            
+            try {
+                const response = await fetch(previewImage.src);
+                const blob = await response.blob();
+                
+                await navigator.clipboard.write([
+                    new ClipboardItem({
+                        [blob.type]: blob
+                    })
+                ]);
+                showToast('图片已复制');
+            } catch (err) {
+                console.error('复制失败:', err);
+                showToast('复制失败，请长按图片手动复制');
+            }
+        }
+
+        function showToast(msg) {
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

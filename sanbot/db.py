@@ -1,5 +1,5 @@
 import pymysql
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 
 def get_connection(cfg: Mapping[str, Any]):
@@ -21,6 +21,7 @@ def init_schema(cfg: Mapping[str, Any]) -> None:
     CREATE TABLE IF NOT EXISTS users (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         openid VARCHAR(64) NOT NULL UNIQUE,
+        selected_season VARCHAR(64) NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
@@ -53,13 +54,67 @@ def init_schema(cfg: Mapping[str, Any]) -> None:
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
 
+    ddl_map_resources = """
+    CREATE TABLE IF NOT EXISTS map_resources (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        scenario VARCHAR(128) NOT NULL,
+        prefecture VARCHAR(128) NOT NULL,
+        resource_level VARCHAR(32) NOT NULL,
+        coord_x INT NOT NULL,
+        coord_y INT NOT NULL,
+        source_file VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_map_resources_scenario_coord (scenario, prefecture, resource_level, coord_x, coord_y)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+
     conn = get_connection(cfg)
     try:
         with conn.cursor() as cur:
             cur.execute(ddl_users)
             cur.execute(ddl_uploads)
             cur.execute(ddl_upload_members)
+            cur.execute(ddl_map_resources)
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN selected_season VARCHAR(64) NULL")
+            except (pymysql.err.InternalError, pymysql.err.OperationalError) as exc:  # type: ignore[attr-defined]
+                if exc.args and exc.args[0] != 1060:
+                    raise
         conn.commit()
+    finally:
+        conn.close()
+
+
+def set_user_selected_season(cfg: Mapping[str, Any], openid: str, season: str) -> None:
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (openid, selected_season)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE selected_season = VALUES(selected_season)
+                """,
+                (openid, season),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_selected_season(cfg: Mapping[str, Any], openid: str) -> Optional[str]:
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT selected_season FROM users WHERE openid=%s LIMIT 1",
+                (openid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row.get("selected_season")
     finally:
         conn.close()
 
@@ -138,6 +193,39 @@ def ensure_user_exists(cfg: Mapping[str, Any], openid: str) -> None:
         with conn.cursor() as cur:
             cur.execute("INSERT IGNORE INTO users (openid) VALUES (%s)", (openid,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def set_user_selected_season(cfg: Mapping[str, Any], openid: str, season: str) -> None:
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (openid, selected_season)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE selected_season = VALUES(selected_season)
+                """,
+                (openid, season),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_selected_season(cfg: Mapping[str, Any], openid: str) -> Optional[str]:
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT selected_season FROM users WHERE openid=%s LIMIT 1",
+                (openid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row.get("selected_season")
     finally:
         conn.close()
 
@@ -224,6 +312,24 @@ def get_member_history(cfg: Mapping[str, Any], user_openid: str, member_name: st
                 ORDER BY u.ts ASC, u.id ASC
                 """,
                 (user_openid, member_name),
+            )
+            rows = cur.fetchall() or []
+        return list(rows)
+    finally:
+        conn.close()
+
+
+def list_map_resources_by_scenario(cfg: Mapping[str, Any], scenario: str) -> list[dict[str, Any]]:
+    conn = get_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT prefecture, resource_level, coord_x, coord_y
+                FROM map_resources
+                WHERE scenario=%s
+                """,
+                (scenario,),
             )
             rows = cur.fetchall() or []
         return list(rows)
